@@ -95,6 +95,7 @@ repeat_send:
                         goto repeat_send;
         }
         set_fs(oldmm);
+      //pr_info("msg.msg_iter.kvec->iov_len: %zu\n",msg.msg_iter.kvec->iov_len);
         return written ? written:len;
 }
 
@@ -158,8 +159,10 @@ int tcp_client_fwd_page(struct *page)
 */
 //int leader_client_fwd_filter(struct socket *conn_socket, int id, char *ip,
 //int port /*,struct *bloom_filter)*/)
-int leader_client_fwd_filter(struct remote_server *rs, int lid)
+int leader_client_fwd_filter(struct remote_server *dest_rs,\
+                struct remote_server *src_rs)
 {
+        int lid;
         struct socket *conn_socket;
         int id;
         char *ip;
@@ -175,14 +178,14 @@ int leader_client_fwd_filter(struct remote_server *rs, int lid)
 
         DECLARE_WAIT_QUEUE_HEAD(bflt_wait);
 
+        lid = src_rs->rs_id;
+
         rs_addr = kmalloc(sizeof(struct sockaddr_in), GFP_KERNEL);
 
-
-        conn_socket = rs->lcc_socket;
-        id = rs->rs_id;
-        ip = rs->rs_ip;
-        port = rs->rs_port;
-
+        conn_socket = dest_rs->lcc_socket;
+        id = dest_rs->rs_id;
+        ip = dest_rs->rs_ip;
+        port = dest_rs->rs_port;
         
         ret = 
         conn_socket->ops->getname(conn_socket, (struct sockaddr *)rs_addr,\
@@ -206,9 +209,14 @@ resend:
                 kfree(tmp);
 
         memset(out_msg, 0, len+1);
-        snprintf(out_msg, strlen(out_msg), "RECV:BFLT:%s:%d", ip, port);
+        snprintf(out_msg, sizeof(out_msg), "RECV:BFLT:%s:%d",\
+                        src_rs->rs_ip, src_rs->rs_port);
 
-        leader_client_send(conn_socket, out_msg, strlen(out_msg), MSG_DONTWAIT);
+        ret = leader_client_send(conn_socket, out_msg, strlen(out_msg),\
+                        MSG_DONTWAIT);
+
+        pr_info("leader client[%d] to rs[%d] succefully sent: %d bytes\n",
+                        lid, id, ret);
 
         wait_event_timeout(bflt_wait,\
                         !skb_queue_empty(&conn_socket->sk->sk_receive_queue),\

@@ -446,7 +446,7 @@ send:
                                                 //leader_client_fwd_filter(
                                                 //rs->lcc_socket, id, rs->rs_ip,
                                                 //rs->rs_port);
-                                                leader_client_fwd_filter(rs_tmp, id\
+                                                leader_client_fwd_filter(rs_tmp, rs\
                                                         /*,bloom_filter*/);
                                             }
                                             kfree(ip);

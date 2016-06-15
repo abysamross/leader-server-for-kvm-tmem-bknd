@@ -54,13 +54,15 @@ u32 create_addr_from_str(char *str)
         return addr;
 }
 
-int leader_client_send(struct socket *sock, const char *buf, const size_t length,\
-                unsigned long flags)
+int leader_client_send(struct socket *sock, void  *snd_buf, const size_t length,\
+                unsigned long flags, int huge)
 {
         struct msghdr msg;
         //struct iovec iov;
         struct kvec vec;
         int len, written = 0, left = length;
+        char *buf;
+        unsigned long *bitmap;
         mm_segment_t oldmm;
 
         msg.msg_name    = 0;
@@ -73,20 +75,31 @@ int leader_client_send(struct socket *sock, const char *buf, const size_t length
         msg.msg_controllen = 0;
         msg.msg_flags   = flags;
 
+        if(huge)
+                bitmap = (unsigned long *)snd_buf;
+        else
+                buf = (char *)snd_buf;
+
         oldmm = get_fs(); set_fs(KERNEL_DS);
+
 repeat_send:
         /*
         msg.msg_iov->iov_len  = left;
         msg.msg_iov->iov_base = (char *)buf + written; 
         */
         vec.iov_len = left;
-        vec.iov_base = (char *)buf + written;
+
+        if(huge)
+                vec.iov_base = bitmap + written;
+        else
+                vec.iov_base = buf + written;
 
         //len = sock_sendmsg(sock, &msg, left);
         len = kernel_sendmsg(sock, &msg, &vec, left, left);
         if((len == -ERESTARTSYS) || (!(flags & MSG_DONTWAIT) &&\
                                 (len == -EAGAIN)))
                 goto repeat_send;
+
         if(len > 0)
         {
                 written += len;
@@ -144,13 +157,8 @@ read_again:
         return len;
 }
 
-/*
-int tcp_client_fwd_filter(struct *bloom_filter)
-{
-        send(bloom_filter);
-        receive(response);
-}
 
+/*
 int tcp_client_fwd_page(struct *page)
 {
        send(page); 
@@ -192,62 +200,87 @@ int leader_client_fwd_filter(struct remote_server *dest_rs,\
                                                                 &addr_len, 2);
         if(ret < 0)
                pr_info(" *** mtp | getname error: %d in leader client[%d] "
-                       "to rs[%d] | leader_client_fwd_filter  \n", ret, lid, id);
+                       "to rs[%d] | leader_client_fwd_filter ***\n",
+                       ret, lid, id);
         else
-                tmp = inet_ntoa(&(rs_addr->sin_addr));
+               tmp = inet_ntoa(&(rs_addr->sin_addr));
 
 resend:
-        pr_info("leader client[%d] to rs[%d] sending BFLT to %s:%d\n",
-                        lid, id, ip, port);
+        pr_info(" *** mtp | leader client[%d] to rs[%d] sending BFLT to "
+                "%s:%d | leader_client_fwd_filter ***\n",
+                lid, id, ip, port);
         if( ret >= 0)
         {
-                pr_info("leader client[%d] to rs[%d] details: \n"
-                        "rs_ip: %s:%d\n", lid, id, tmp, 
-                        ntohs(rs_addr->sin_port));
+                pr_info(" *** mtp | leader client[%d] to rs[%d] details: \n"
+                        "rs_ip: %s:%d | leader_client_fwd_filter ***\n", 
+                        lid, id, tmp, ntohs(rs_addr->sin_port));
         }
+
         if(!tmp)
                 kfree(tmp);
 
         memset(out_msg, 0, len+1);
-        snprintf(out_msg, sizeof(out_msg), "RECV:BFLT:%s:%d",\
-                        src_rs->rs_ip, src_rs->rs_port);
+        snprintf(out_msg, sizeof(out_msg), "RECV:BFLT:%s:%d:%d",\
+                 src_rs->rs_ip, src_rs->rs_port, src_rs->rs_bmap_size);
 
         ret = leader_client_send(conn_socket, out_msg, strlen(out_msg),\
-                        MSG_DONTWAIT);
+                                 MSG_DONTWAIT, 0);
 
-        pr_info("leader client[%d] to rs[%d] succefully sent: %d bytes\n",
-                        lid, id, ret);
+        pr_info(" *** mtp | leader client[%d] to rs[%d] succefully sent: %d "
+                "bytes | leader_client_fwd_filter ***\n",
+                lid, id, ret);
 
         wait_event_timeout(bflt_wait,\
                         !skb_queue_empty(&conn_socket->sk->sk_receive_queue),\
-                                                                        5*HZ);
+                                                                        10*HZ);
         if(!skb_queue_empty(&conn_socket->sk->sk_receive_queue))
         {
-                pr_info("leader client[%d] to rs[%d] receiving message from: "
-                        "%s:%d\n", lid, id, ip, port);
+                pr_info(" *** mtp | leader client[%d] to rs[%d] receiving "
+                        "message from: %s:%d | leader_client_fwd_filter ***\n",
+                        lid, id, ip, port);
 
                 memset(in_msg, 0, len+1);
                 ret = leader_client_receive(conn_socket, in_msg, MSG_DONTWAIT);
 
+                pr_info(" *** mtp | leader client[%d] to rs[%d] received "
+                        "message: %s from: %s:%d | "
+                        "leader_client_fwd_filter ***\n",
+                        lid, id, in_msg, ip, port);
+
                 if(ret > 0)
                 {
-                        if(memcmp(in_msg, "BFLT:RECVD", 10) == 0)
+                        if(memcmp(in_msg, "SEND", 4) == 0)
                         {
-                                pr_info("leader client[%d] to rs[%d] FWD:BFLT "
-                                        "success\n", lid, id);
+                                if(memcmp(in_msg+5, "BFLT", 4) == 0)
+                                {
+                                        ret = 
+                                        leader_client_send(conn_socket, \
+                                        src_rs->rs_bitmap, src_rs->rs_bmap_size,\
+                                        MSG_DONTWAIT, 1);
+
+                                        pr_info(" *** mtp | leader client[%d] "
+                                                "to rs[%d] succefully sent: %d "
+                                                "bytes | "
+                                                "leader_client_fwd_filter *** \n",
+                                                lid, id, ret);
+                                }
                                 goto success; 
                         }
                         else
                         {
-                                pr_info("leader client[%d] to rs[%d] re-sending "
-                                        "FWD:BFLT\n", lid, id);
+                                pr_info(" *** mtp | leader client[%d] to "
+                                        "rs[%d] re-sending FWD:BFLT | " 
+                                        "leader_client_fwd_filter *** \n",
+                                        lid, id);
+                                /*should I really resend the bflt?*/
                                 goto resend;
                         }
                 }
         }
         else
         {
-                pr_info("leader client[%d] to rs[%d] FWD:BFLT failed\n", lid, id);
+                pr_info(" *** mtp | leader client[%d] to rs[%d] FWD:BFLT "
+                        "failed | leader_client_fwd_filter ***\n", lid, id);
                 goto fail;
         }
 
@@ -280,9 +313,12 @@ int leader_client_connect(struct remote_server *rs)
         //strcpy(ip2, dip);
         port = rs->rs_port; 
         id = rs->rs_id;
+
         pr_info(" *** mtp | leader client[%d] connecting to remote server: %d | "
                 "leader_client_connect *** \n", id, id);
-        pr_info("remote server: %d destination ip: %s:%d\n", id, ip, port);
+
+        pr_info(" *** mtp | remote server: %d destination ip: %s:%d | "
+                "leader_client_connect ***\n", id, ip, port);
 
         /*
         char *response = kmalloc(4096, GFP_KERNEL);
@@ -354,7 +390,7 @@ void leader_client_exit(struct socket *conn_socket)
         memset(&reply, 0, len+1);
         strcat(reply, "ADIOS"); 
         //tcp_client_send(conn_socket, reply);
-        leader_client_send(conn_socket, reply, strlen(reply), MSG_DONTWAIT);
+        leader_client_send(conn_socket, reply, strlen(reply), MSG_DONTWAIT, 0);
 
         //while(1)
         //{
@@ -378,5 +414,6 @@ void leader_client_exit(struct socket *conn_socket)
         {
                 sock_release(conn_socket);
         }
-        pr_info(" *** mtp | leader client exiting | network_client_exit *** \n");
+
+        pr_info(" *** mtp | leader client exiting | leader_client_exit *** \n");
 }

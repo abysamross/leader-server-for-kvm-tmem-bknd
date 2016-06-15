@@ -1,6 +1,14 @@
 #ifndef _LTCP_H_
 #define _LTCP_H_
 
+struct bloom_filter {
+	struct kref		kref;
+	struct mutex		lock;
+	struct list_head	alg_list;
+	unsigned int		bitmap_size;
+	unsigned long		bitmap[0];
+};
+
 struct remote_server
 {
         struct socket *lcc_socket;
@@ -12,6 +20,9 @@ struct remote_server
         char *rs_ip;
         int rs_port;
         struct sockaddr_in *rs_addr;
+        //unsigned long rs_bitmap[0];
+        unsigned long *rs_bitmap;
+        int rs_bmap_size;
         struct list_head rs_list;
 };
 

@@ -352,6 +352,9 @@ int leader_client_connect(struct remote_server *rs)
 
         ret = conn_socket->ops->connect(conn_socket, (struct sockaddr *)&saddr\
                         , sizeof(saddr), O_RDWR);
+        
+        pr_info("connection attempt return value: %d\n", ret);
+
         if(ret && (ret != -EINPROGRESS))
         {
                 pr_info(" *** mtp | leader client[%d] error: %d while "

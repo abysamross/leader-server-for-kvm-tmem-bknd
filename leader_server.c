@@ -123,6 +123,7 @@ repeat_send:
         }
         
         set_fs(oldmm);
+        pr_info(" *** mtp | send: %d bytes | tcp_server_send\n", written);
         return written?written:len;
 }
 
@@ -133,17 +134,14 @@ int tcp_server_receive(struct socket *sock, void *rcv_buf,int size,\
 {
         struct msghdr msg;
         struct kvec vec;
-        int len, written = 0, left = size;
+        int len, totread = 0, left = size;
         char *buf = NULL;
-        unsigned long *bitmap;
+        //unsigned long *bitmap = NULL;
         
         if(sock==NULL)
                 return -1;
 
-        if(huge)
-                bitmap = (unsigned long *)rcv_buf;
-        else
-                buf = (char *)rcv_buf;
+        buf = (char *)rcv_buf;
 
         msg.msg_name = 0;
         msg.msg_namelen = 0;
@@ -154,33 +152,40 @@ int tcp_server_receive(struct socket *sock, void *rcv_buf,int size,\
 read_again:
 
         vec.iov_len = left;
+        vec.iov_base = (char *)(buf + totread);
 
-        if(huge)
-                vec.iov_base = bitmap + written;
-        else
-                vec.iov_base = buf + written;
-
-        if(!skb_queue_empty(&sock->sk->sk_receive_queue))
-                pr_info("recv queue empty ? %s \n",
-                skb_queue_empty(&sock->sk->sk_receive_queue)?"yes":"no");
-
+        //if(!skb_queue_empty(&sock->sk->sk_receive_queue))
+        //        pr_info("recv queue empty ? %s \n",
+        //        skb_queue_empty(&sock->sk->sk_receive_queue)?"yes":"no");
         len = kernel_recvmsg(sock, &msg, &vec, left, left, flags);
 
         if(len == -EAGAIN || len == -ERESTARTSYS)
                 goto read_again;
-        
+
+        //pr_info("read: %d\n", len);
         if(huge)
         {
+                /* 
+                 * you should timeout somehow if you cannot get the entire bloom
+                 * filter rather than simply looping around.
+                 */
                 if(len > 0)
                 {
-                        written += len;
+                        pr_info("len: %d\n", len);
+                        if((len == 4) && (memcmp(buf+totread, "FAIL", 4) == 0))
+                                goto recv_out;
+                        totread += len;
+                        pr_info("total read: %d\n", totread);
                         left -= len;
+                        pr_info("left: %d\n", left);
                         if(left)
                                 goto read_again;
                 }
         }
         //len = msg.msg_iter.kvec->iov_len;
-        return len;
+recv_out:
+       pr_info("returning from receive\n");
+       return totread?totread:len;
 }
 
 //struct remote_server *register_rs(struct socket *socket, char* pkt,
@@ -241,16 +246,25 @@ int receive_and_fwd_bflt(struct socket *accept_socket, struct remote_server *rs,
         int len = 49;
         char out_buf[len+1];
         struct remote_server *rs_tmp;
-        int ret;
+        int ret = 0;
+        //int tot_ret = 0;
         //char in_buf[len+1];
         //struct bloom_filter *bflt;
         unsigned long *bitmap;
         int bmap_bytes_size = 0;
+        //int n_pages = 0;
+        void *vaddr;
+        int i=0;
         
         bmap_bytes_size = BITS_TO_LONGS(bmap_bits_size)*sizeof(unsigned long);
-        
+        //n_pages = (bmap_bytes_size + PAGE_SIZE - 1)/PAGE_SIZE;
+
         bitmap = vmalloc(bmap_bytes_size);
         memset(bitmap, 0, bmap_bytes_size);
+        
+        for(i = 0; i < bmap_bits_size; i++)
+                if(test_bit(i, bitmap))
+                        pr_info("%d bit is set\n", i);
 
         if(!bitmap)
         {
@@ -270,19 +284,45 @@ int receive_and_fwd_bflt(struct socket *accept_socket, struct remote_server *rs,
         
         tcp_server_send(accept_socket, out_buf, strlen(out_buf),\
                         MSG_DONTWAIT);
+        
+        vaddr = (void *)bitmap;
 
-        ret = tcp_server_receive(accept_socket, (void *)bitmap, 
-                                        bmap_bytes_size, MSG_DONTWAIT, 1);
+        ret = 
+        tcp_server_receive(accept_socket, vaddr, bmap_bytes_size,\
+        MSG_DONTWAIT, 1);
 
         pr_info(" *** mtp | leader server[%d] received bitmap (size: %d) of "
                 "rs[%d] | receive_and_fwd_bflt *** \n",
                 conn->thread_id, ret, rs->rs_id);
+
+        if( ret != bmap_bytes_size)
+                goto recv_bflt_out;
+        
+
+        /*
+        for(i = 0; i < n_pages; i++)
+        {
+                ret = 
+                tcp_server_receive(accept_socket, vaddr, 
+                PAGE_SIZE, MSG_DONTWAIT, 1);
+                vaddr += PAGE_SIZE;
+                tot_ret += ret;
+        }
+
+        pr_info(" *** mtp | leader server[%d] received bitmap (size: %d) of "
+                "rs[%d] | receive_and_fwd_bflt *** \n",
+                conn->thread_id, tot_ret, rs->rs_id);
+        */
 
         pr_info(" *** mtp | leader server[%d] testing received bitmap of "
                 "rs[%d]\n bitmap[0]: %d, bitmap[10]: %d |\n "
                 "receive_and_fwd_bflt *** \n",
                 conn->thread_id, rs->rs_id,
                 test_bit(0, bitmap), test_bit(10, bitmap));
+
+        for(i = 0; i < bmap_bits_size; i++)
+                if(test_bit(i, bitmap))
+                        pr_info("%d bit is set\n", i);
         /*
         pr_info("received bitmap[0]:%d of rs:[%d]\n",
                         test_bit(0, bitmap), rs->rs_id); 
@@ -334,7 +374,7 @@ int receive_and_fwd_bflt(struct socket *accept_socket, struct remote_server *rs,
 
 
         /*
-         * unomment the 2 lines depending on
+         * ucomment the 2 lines depending on
          * whether you want to keep the blft
          * bitmap around even after sending it
          * across to all registered RSes.
@@ -344,6 +384,11 @@ int receive_and_fwd_bflt(struct socket *accept_socket, struct remote_server *rs,
          * ***********************************
          */
         return 0;
+
+recv_bflt_out:
+
+        vfree(bitmap);
+        return -1;
 }
 
 //int create_and_register_rs(struct socket **socket, struct remote_server **rsp,
@@ -547,7 +592,7 @@ regresp:
                                       "connection_handler *** \n",
                                       id, out_buf, ip, port);
 
-                              tcp_server_send(accept_socket, out_buf,\
+                              ret = tcp_server_send(accept_socket, out_buf,\
                                               strlen(out_buf), MSG_DONTWAIT);
 
                               //if(strcmp(out_buf,"FAIL") == 0)

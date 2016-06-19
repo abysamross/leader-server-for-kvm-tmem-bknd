@@ -82,13 +82,13 @@ char *inet_ntoa(struct in_addr *in)
         int_ip = in->s_addr;
 
         sprintf(str_ip, "%d.%d.%d.%d", (int_ip) & 0xFF, (int_ip >> 8) & 0xFF,
-                                 (int_ip >> 16) & 0xFF, (int_ip >> 24) & 0xFF);
+                (int_ip >> 16) & 0xFF, (int_ip >> 24) & 0xFF);
         
         return str_ip;
 }
 
 int tcp_server_send(struct socket *sock, const char *buf, const size_t length,\
-                unsigned long flags)
+                    unsigned long flags)
 {
         struct msghdr msg;
         struct kvec vec;
@@ -110,8 +110,7 @@ repeat_send:
 
         len = kernel_sendmsg(sock, &msg, &vec, left, left);
         
-        if((len == -ERESTARTSYS) || (!(flags & MSG_DONTWAIT) &&\
-                                (len == -EAGAIN)))
+        if((len == -ERESTARTSYS) || (!(flags & MSG_DONTWAIT)&&(len == -EAGAIN)))
                 goto repeat_send;
 
         if(len > 0)
@@ -154,9 +153,11 @@ read_again:
         vec.iov_len = left;
         vec.iov_base = (char *)(buf + totread);
 
-        //if(!skb_queue_empty(&sock->sk->sk_receive_queue))
-        //        pr_info("recv queue empty ? %s \n",
-        //        skb_queue_empty(&sock->sk->sk_receive_queue)?"yes":"no");
+        /*
+        if(!skb_queue_empty(&sock->sk->sk_receive_queue))
+                pr_info("recv queue empty ? %s \n",
+                skb_queue_empty(&sock->sk->sk_receive_queue)?"yes":"no");
+        */
         len = kernel_recvmsg(sock, &msg, &vec, left, left, flags);
 
         if(len == -EAGAIN || len == -ERESTARTSYS)
@@ -184,14 +185,14 @@ read_again:
         }
         //len = msg.msg_iter.kvec->iov_len;
 recv_out:
-       pr_info("returning from receive\n");
-       return totread?totread:len;
+        pr_info("returning from receive\n");
+        return totread?totread:len;
 }
 
 //struct remote_server *register_rs(struct socket *socket, char* pkt,
 //                int id, struct sockaddr_in *address)
 struct remote_server *register_rs(struct socket *socket,\
-                                        struct tcp_conn_handler_data *conn) 
+                                  struct tcp_conn_handler_data *conn) 
 {
         struct remote_server *rs = NULL;
         
@@ -237,104 +238,10 @@ struct remote_server *register_rs(struct socket *socket,\
         return rs;
 }
 
-//int receive_and_fwd_bflt(struct socket *accept_socket,
-//                                struct remote_server *rs,int id, char *clip,
-//                                                int port, int bmap_bits_size)
-int receive_and_fwd_bflt(struct socket *accept_socket, struct remote_server *rs,\
-                        struct tcp_conn_handler_data *conn, int bmap_bits_size)
+void fwd_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
 {
-        int len = 49;
-        char out_buf[len+1];
         struct remote_server *rs_tmp;
-        int ret = 0;
-        //int tot_ret = 0;
-        //char in_buf[len+1];
-        //struct bloom_filter *bflt;
-        unsigned long *bitmap;
-        int bmap_bytes_size = 0;
-        //int n_pages = 0;
-        void *vaddr;
-        int i=0;
-        
-        bmap_bytes_size = BITS_TO_LONGS(bmap_bits_size)*sizeof(unsigned long);
-        //n_pages = (bmap_bytes_size + PAGE_SIZE - 1)/PAGE_SIZE;
 
-        bitmap = vmalloc(bmap_bytes_size);
-        memset(bitmap, 0, bmap_bytes_size);
-        
-        for(i = 0; i < bmap_bits_size; i++)
-                if(test_bit(i, bitmap))
-                        pr_info("%d bit is set\n", i);
-
-        if(!bitmap)
-        {
-                pr_info(" *** mtp | failed to allocate memory for bflt of "
-                        "rs[%d] | receive_and_fwd_bflt *** \n", conn->thread_id);
-                return -1;
-        }
-        /* announce that you are ready
-         * to receive the bflt
-         */
-        memset(out_buf, 0, len+1);
-        strcat(out_buf, "SEND:BFLT");
-
-        pr_info(" *** mtp | leader server[%d] sending response: %s to: %s:%d |"
-                "receive_and_fwd_bflt *** \n", 
-                conn->thread_id, out_buf, conn->ip, conn->port);
-        
-        tcp_server_send(accept_socket, out_buf, strlen(out_buf),\
-                        MSG_DONTWAIT);
-        
-        vaddr = (void *)bitmap;
-
-        ret = 
-        tcp_server_receive(accept_socket, vaddr, bmap_bytes_size,\
-        MSG_DONTWAIT, 1);
-
-        pr_info(" *** mtp | leader server[%d] received bitmap (size: %d) of "
-                "rs[%d] | receive_and_fwd_bflt *** \n",
-                conn->thread_id, ret, rs->rs_id);
-
-        if( ret != bmap_bytes_size)
-                goto recv_bflt_out;
-        
-
-        /*
-        for(i = 0; i < n_pages; i++)
-        {
-                ret = 
-                tcp_server_receive(accept_socket, vaddr, 
-                PAGE_SIZE, MSG_DONTWAIT, 1);
-                vaddr += PAGE_SIZE;
-                tot_ret += ret;
-        }
-
-        pr_info(" *** mtp | leader server[%d] received bitmap (size: %d) of "
-                "rs[%d] | receive_and_fwd_bflt *** \n",
-                conn->thread_id, tot_ret, rs->rs_id);
-        */
-
-        pr_info(" *** mtp | leader server[%d] testing received bitmap of "
-                "rs[%d]\n bitmap[0]: %d, bitmap[10]: %d |\n "
-                "receive_and_fwd_bflt *** \n",
-                conn->thread_id, rs->rs_id,
-                test_bit(0, bitmap), test_bit(10, bitmap));
-
-        for(i = 0; i < bmap_bits_size; i++)
-                if(test_bit(i, bitmap))
-                        pr_info("%d bit is set\n", i);
-        /*
-        pr_info("received bitmap[0]:%d of rs:[%d]\n",
-                        test_bit(0, bitmap), rs->rs_id); 
-        */
-        if(rs->rs_bitmap != NULL)
-                vfree(rs->rs_bitmap);
-        rs->rs_bmap_size = bmap_bytes_size; 
-        rs->rs_bitmap = bitmap;
-        /*
-        pr_info("rs->rs_bitmap[0]:%d of rs:[%d]\n",
-                        test_bit(0, rs->rs_bitmap), rs->rs_id); 
-        */
         down_read(&rs_rwmutex);
         if(!(list_empty(&rs_head)))
         {
@@ -358,12 +265,24 @@ int receive_and_fwd_bflt(struct socket *accept_socket, struct remote_server *rs,
 
                     if(rs_tmp->rs_id != conn->thread_id)
                     {
-                        //leader_client_fwd_filter(
-                        //rs->lcc_socket, id, rs->rs_ip,
-                        //rs->rs_port);
+                        /*
+                        if(leader_client_fwd_filter(rs_tmp, rs) < 0)
+                                goto recv_bflt_out; 
+                         */
 
-                        //this sending function should 
-                        // not be under lock!!
+                        /* 
+                         * the leader_client_fwd_filter function tries to 
+                         * forward the bflt a second time, if the first attempt
+                         * fails, and if that too fails it just moves onto the
+                         * next remote server
+                         */
+
+                        /* 
+                         * also the retry attempt can be moved to here rather
+                         * than from within the leader_client_fwd_filter
+                         * function, as it was implemented in normal remote 
+                         * server
+                         */
                         leader_client_fwd_filter(rs_tmp, rs);
                     }
                     kfree(ip);
@@ -371,8 +290,6 @@ int receive_and_fwd_bflt(struct socket *accept_socket, struct remote_server *rs,
         }
         else
                 up_read(&rs_rwmutex);
-
-
         /*
          * ucomment the 2 lines depending on
          * whether you want to keep the blft
@@ -383,18 +300,99 @@ int receive_and_fwd_bflt(struct socket *accept_socket, struct remote_server *rs,
          * vfree(bitmap);
          * ***********************************
          */
+}
+//int receive_and_fwd_bflt(struct socket *accept_socket,
+//                                struct remote_server *rs,int id, char *clip,
+//                                                int port, int bmap_bits_size)
+int receive_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
+{
+        int len = 49;
+        char out_buf[len+1];
+        int ret = 0;
+        //int tot_ret = 0;
+        //char in_buf[len+1];
+        //struct bloom_filter *bflt;
+        unsigned long *bitmap;
+        int bmap_bits_size = 0;
+        int bmap_bytes_size = 0;
+        //int n_pages = 0;
+        void *vaddr;
+        int i=0;
+        
+
+        kstrtoint(conn->in_buf+10, 10, &bmap_bits_size);
+
+        bmap_bytes_size = BITS_TO_LONGS(bmap_bits_size)*sizeof(unsigned long);
+        //n_pages = (bmap_bytes_size + PAGE_SIZE - 1)/PAGE_SIZE;
+
+        bitmap = vmalloc(bmap_bytes_size);
+        memset(bitmap, 0, bmap_bytes_size);
+        
+        for(i = 0; i < bmap_bits_size; i++)
+                if(test_bit(i, bitmap))
+                        pr_info("%d bit is set\n", i);
+
+        if(!bitmap)
+        {
+                pr_info(" *** mtp | failed to allocate memory for bflt of "
+                        "rs[%d] | receive_and_fwd_bflt *** \n", conn->thread_id);
+                goto recv_bflt_out;
+        }
+        /* announce that you are ready
+         * to receive the bflt
+         */
+        memset(out_buf, 0, len+1);
+        strcat(out_buf, "SEND:BFLT");
+
+        pr_info(" *** mtp | leader server[%d] sending response: %s to: %s:%d |"
+                "receive_and_fwd_bflt *** \n", 
+                conn->thread_id, out_buf, conn->ip, conn->port);
+        
+        tcp_server_send(conn->accept_socket, out_buf, strlen(out_buf),\
+                        MSG_DONTWAIT);
+        
+        vaddr = (void *)bitmap;
+
+        ret = 
+        tcp_server_receive(conn->accept_socket, vaddr, bmap_bytes_size,\
+                           MSG_DONTWAIT, 1);
+
+        pr_info(" *** mtp | leader server[%d] received bitmap (size: %d) of "
+                "rs[%d] | receive_and_fwd_bflt *** \n",
+                conn->thread_id, ret, rs->rs_id);
+
+        if( ret != bmap_bytes_size)
+        {
+                vfree(bitmap);
+                goto recv_bflt_out;
+        }
+
+        pr_info(" *** mtp | leader server[%d] testing received bitmap of "
+                "rs[%d]\n bitmap[0]: %d, bitmap[10]: %d |\n "
+                "receive_and_fwd_bflt *** \n",
+                conn->thread_id, rs->rs_id,
+                test_bit(0, bitmap), test_bit(10, bitmap));
+
+        for(i = 0; i < bmap_bits_size; i++)
+                if(test_bit(i, bitmap))
+                        pr_info("%d bit is set\n", i);
+
+        if(rs->rs_bitmap != NULL)
+                vfree(rs->rs_bitmap);
+        
+        rs->rs_bmap_size = bmap_bytes_size; 
+        rs->rs_bitmap = bitmap;
+
         return 0;
 
 recv_bflt_out:
-
-        vfree(bitmap);
         return -1;
 }
 
 //int create_and_register_rs(struct socket **socket, struct remote_server **rsp,
 //                             char *buf, int id, struct sockaddr_in *address)
 int create_and_register_rs(struct socket **socket, struct remote_server **rsp,\
-                             struct tcp_conn_handler_data *conn)
+                           struct tcp_conn_handler_data *conn)
 {
         int err;
         struct remote_server *rs;
@@ -455,7 +453,7 @@ int connection_handler(void *data)
        struct remote_server *rs = NULL;
 
        struct tcp_conn_handler_data *conn_data = 
-               (struct tcp_conn_handler_data *)data;
+       (struct tcp_conn_handler_data *)data;
 
        //struct sockaddr_in *address = conn_data->address;
        struct socket *accept_socket = conn_data->accept_socket;
@@ -508,7 +506,7 @@ int connection_handler(void *data)
 
                               __set_current_state(TASK_RUNNING);
                               remove_wait_queue(&accept_socket->sk->sk_wq->wait,\
-                                              &recv_wait);
+                                                &recv_wait);
                               kfree(tcp_conn_handler->data[id]->address);
                               kfree(tcp_conn_handler->data[id]->ip);
                               kfree(tcp_conn_handler->data[id]);
@@ -519,7 +517,8 @@ int connection_handler(void *data)
                                       leader_client_exit(lc_conn_socket);
                               }
 
-                        sock_release(tcp_conn_handler->data[id]->accept_socket);
+                              sock_release(tcp_conn_handler->data[id]->\
+                                           accept_socket);
                               /*
                               tcp_conn_handler->thread[id] = NULL;
                               sock_release(sock);
@@ -551,7 +550,7 @@ int connection_handler(void *data)
               //                                        MSG_DONTWAIT);
 
               ret = tcp_server_receive(accept_socket, in_buf, len,\
-                              MSG_DONTWAIT, 0);
+                                       MSG_DONTWAIT, 0);
 
               pr_info(" *** mtp | client-> %s:%d, says: %s | "
                       "connection_handler *** \n", ip, port, in_buf);
@@ -573,7 +572,7 @@ int connection_handler(void *data)
                                */
                               err =
                               create_and_register_rs(&lc_conn_socket, &rs,\
-                                                                conn_data);
+                                                     conn_data);
 
                               if(err < 0)
                                       goto regfail;
@@ -593,7 +592,8 @@ regresp:
                                       id, out_buf, ip, port);
 
                               ret = tcp_server_send(accept_socket, out_buf,\
-                                              strlen(out_buf), MSG_DONTWAIT);
+                                                    strlen(out_buf),\
+                                                    MSG_DONTWAIT);
 
                               //if(strcmp(out_buf,"FAIL") == 0)
                               if(err < 0)
@@ -613,27 +613,31 @@ regresp:
                               /* in_buf+5 bcoz ':' delimiter is present*/
                               if(memcmp(in_buf+5, "BFLT", 4) == 0)
                               {
-                                      //tmp = inet_ntoa(&(address->sin_addr));
-                                      //port = ntohs(address->sin_port);
-                                      int bmap_bits_size = 0;
-
-                                      kstrtoint(in_buf+10, 10, &bmap_bits_size);
-
                                       pr_info(" *** mtp | leader server[%d] "
                                               "received: FRWD:BFLT from: "
-                                              "%s:%d | connection_handler ***\n", 
+                                              "%s:%d | connection_handler ***\n",
                                               id, ip, port);
+
+                                      if(receive_bflt(conn_data, rs) < 0)
+                                              goto bfltfail;
+
                                       /* Wait here till you receive entire bloom
                                        * filter. And then for each remote server 
                                        * registered start tranferring the bloom 
                                        * filter.
-                                       * You can start a thread to do all that??
-                                       * or call a function.
                                        */
 
+                                     /* 
+                                      * the leader server should just receive
+                                      * the bloom filter and send done to normal
+                                      * remote server and forward the bflt to
+                                      * others later??
                                      if(receive_and_fwd_bflt(accept_socket, rs,\
-                                              conn_data, bmap_bits_size) < 0)
+                                                             conn_data,\
+                                                             bmap_bits_size) < 0)
                                                                 goto bfltfail;
+                                      */
+
                                 /* TODO:
                                  * the leader server just sends BFLTFWD w/o
                                  * bothering whether the BFLT was successfully 
@@ -650,12 +654,15 @@ bfltfail:
 bfltresp:
                                       pr_info(" *** mtp | leader server[%d] "
                                               "sending response: %s to: "
-                                              "%s:%d | connection_handler ***\n", 
+                                              "%s:%d | connection_handler ***\n",
                                               id, out_buf, ip, port);
 
                                       tcp_server_send(accept_socket, out_buf,\
-                                                strlen(out_buf), MSG_DONTWAIT);
-                              
+                                                      strlen(out_buf),\
+                                                      MSG_DONTWAIT);
+
+                                      if(memcmp(out_buf, "DONE:BFLT", 9) == 0)
+                                              fwd_bflt(conn_data, rs);
                               }
                               else if(memcmp(in_buf+3, "PAGE", 4) == 0)
                               {
@@ -764,8 +771,8 @@ int tcp_server_accept(void)
                 int addr_len;
 
                 accept_err =  
-                        sock_create(socket->sk->sk_family, socket->type,\
-                                    socket->sk->sk_protocol, &accept_socket);
+                sock_create(socket->sk->sk_family, socket->type,\
+                            socket->sk->sk_protocol, &accept_socket);
                         /*
                         sock_create(PF_INET, SOCK_STREAM, IPPROTO_TCP,\
                                         &accept_socket);
@@ -814,7 +821,7 @@ int tcp_server_accept(void)
                                tcp_acceptor_stopped = 1;
                                __set_current_state(TASK_RUNNING);
                                remove_wait_queue(&socket->sk->sk_wq->wait,\
-                                               &accept_wait);
+                                                 &accept_wait);
                                sock_release(accept_socket);
                                //do_exit(0);
                                return 0;
@@ -824,7 +831,7 @@ int tcp_server_accept(void)
                        {
                                __set_current_state(TASK_RUNNING);
                                remove_wait_queue(&socket->sk->sk_wq->wait,\
-                                               &accept_wait);
+                                                 &accept_wait);
                                goto release;
                        }
 
@@ -836,7 +843,7 @@ int tcp_server_accept(void)
                        "| tcp_server_accept *** \n");
 
                accept_err = 
-                       socket->ops->accept(socket, accept_socket, O_NONBLOCK);
+               socket->ops->accept(socket, accept_socket, O_NONBLOCK);
 
                if(accept_err < 0)
                {
@@ -853,8 +860,8 @@ int tcp_server_accept(void)
 
                accept_err = 
                accept_socket->ops->getname(accept_socket,\
-                               (struct sockaddr *)client,\
-                               &addr_len, 2);
+                                           (struct sockaddr *)client,\
+                                           &addr_len, 2);
 
                if(accept_err < 0)
                {
@@ -994,7 +1001,7 @@ int tcp_server_listen(void)
         //spin_unlock(&tcp_server_lock);
 
         server_err = sock_create(PF_INET, SOCK_STREAM, IPPROTO_TCP,\
-                                &tcp_server->listen_socket);
+                                 &tcp_server->listen_socket);
         if(server_err < 0)
         {
                 pr_info(" *** mtp | Error: %d while creating tcp server "
@@ -1012,7 +1019,7 @@ int tcp_server_listen(void)
 
         server_err = 
         conn_socket->ops->bind(conn_socket, (struct sockaddr*)&server,\
-                        sizeof(server));
+                               sizeof(server));
 
         if(server_err < 0)
         {
@@ -1030,11 +1037,11 @@ int tcp_server_listen(void)
                 pr_info(" *** mtp | Error: %d while listening in tcp "
                         "server listen socket | tcp_server_listen "
                         "*** \n", server_err);
-                        goto release;
+                goto release;
         }
 
         tcp_server->accept_thread = 
-                kthread_run((void*)tcp_server_accept, NULL, MODULE_NAME);
+        kthread_run((void*)tcp_server_accept, NULL, MODULE_NAME);
 
         while(1)
         {
@@ -1073,7 +1080,7 @@ int tcp_server_start(void)
 {
         tcp_server->running = 1;
         tcp_server->thread = kthread_run((void *)tcp_server_listen, NULL,\
-                                        MODULE_NAME);
+                                         MODULE_NAME);
         if(tcp_listener_stopped)
                 return -1;
 
@@ -1123,9 +1130,10 @@ static void __exit network_server_exit(void)
 
                                         if(!ret)
                                                 pr_info(" *** mtp | tcp server "
-                                                "connection handler thread: %d "
-                                                "stopped | network_server_exit "
-                                                "*** \n", id);
+                                                        "connection handler "
+                                                        "thread: %d stopped | "
+                                                        "network_server_exit "
+                                                        "*** \n", id);
                                 }
                        }
                 }

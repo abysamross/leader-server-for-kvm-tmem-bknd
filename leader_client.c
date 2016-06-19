@@ -55,14 +55,13 @@ u32 create_addr_from_str(char *str)
 }
 
 int leader_client_send(struct socket *sock, void  *snd_buf, const size_t length,\
-                unsigned long flags, int huge)
+                       unsigned long flags, int huge)
 {
         struct msghdr msg;
         //struct iovec iov;
         struct kvec vec;
         int len, written = 0, left = length;
         char *buf;
-        unsigned long *bitmap;
         mm_segment_t oldmm;
 
         msg.msg_name    = 0;
@@ -75,10 +74,7 @@ int leader_client_send(struct socket *sock, void  *snd_buf, const size_t length,
         msg.msg_controllen = 0;
         msg.msg_flags   = flags;
 
-        if(huge)
-                bitmap = (unsigned long *)snd_buf;
-        else
-                buf = (char *)snd_buf;
+        buf = (char *)snd_buf;
 
         oldmm = get_fs(); set_fs(KERNEL_DS);
 
@@ -88,32 +84,37 @@ repeat_send:
         msg.msg_iov->iov_base = (char *)buf + written; 
         */
         vec.iov_len = left;
-
-        if(huge)
-                vec.iov_base = bitmap + written;
-        else
-                vec.iov_base = buf + written;
+        vec.iov_base = (char *)(buf + written);
 
         //len = sock_sendmsg(sock, &msg, left);
         len = kernel_sendmsg(sock, &msg, &vec, left, left);
-        if((len == -ERESTARTSYS) || (!(flags & MSG_DONTWAIT) &&\
-                                (len == -EAGAIN)))
+
+        if((len == -ERESTARTSYS) || (!(flags & MSG_DONTWAIT)&&(len == -EAGAIN)))
                 goto repeat_send;
 
-        if(len > 0)
+        //pr_info("written: %d\n", len);
+
+        if(huge)
         {
-                written += len;
-                left -= len;
-                if(left)
-                        goto repeat_send;
+                if(len > 0)
+                {
+                        //pr_info("written: %d\n", len);
+                        written += len;
+                        //pr_info("total written: %d\n", written);
+                        left -= len;
+                        //pr_info("left: %d\n", left);
+                        if(left)
+                                goto repeat_send;
+                }
         }
         set_fs(oldmm);
-      //pr_info("msg.msg_iter.kvec->iov_len: %zu\n",msg.msg_iter.kvec->iov_len);
+        pr_info(" *** mtp | return from send after writing total: %d bytes, "
+                "last write: %d bytes | leader_client_send \n", written, len);
+        //pr_info("msg.msg_iter.kvec->iov_len: %zu\n",msg.msg_iter.kvec->iov_len);
         return written ? written:len;
 }
 
-int leader_client_receive(struct socket *sock, char *str,\
-                        unsigned long flags)
+int leader_client_receive(struct socket *sock, char *str, unsigned long flags)
 {
         //mm_segment_t oldmm;
         struct msghdr msg;
@@ -179,7 +180,7 @@ int leader_client_fwd_filter(struct remote_server *dest_rs,\
         char in_msg[len+1];
         char out_msg[len+1];
         int ret;
-        
+        int attempts = 0;
         struct sockaddr_in *rs_addr;
         char *tmp = NULL;
         int addr_len;
@@ -197,7 +198,7 @@ int leader_client_fwd_filter(struct remote_server *dest_rs,\
         
         ret = 
         conn_socket->ops->getname(conn_socket, (struct sockaddr *)rs_addr,\
-                                                                &addr_len, 2);
+                                  &addr_len, 2);
         if(ret < 0)
                pr_info(" *** mtp | getname error: %d in leader client[%d] "
                        "to rs[%d] | leader_client_fwd_filter ***\n",
@@ -205,7 +206,7 @@ int leader_client_fwd_filter(struct remote_server *dest_rs,\
         else
                tmp = inet_ntoa(&(rs_addr->sin_addr));
 
-resend:
+fwd_bflt_resend:
         pr_info(" *** mtp | leader client[%d] to rs[%d] sending BFLT to "
                 "%s:%d | leader_client_fwd_filter ***\n",
                 lid, id, ip, port);
@@ -230,9 +231,11 @@ resend:
                 "bytes | leader_client_fwd_filter ***\n",
                 lid, id, ret);
 
+fwd_bflt_wait:
+
         wait_event_timeout(bflt_wait,\
-                        !skb_queue_empty(&conn_socket->sk->sk_receive_queue),\
-                                                                        10*HZ);
+                           !skb_queue_empty(&conn_socket->sk->sk_receive_queue),\
+                           5*HZ);
         if(!skb_queue_empty(&conn_socket->sk->sk_receive_queue))
         {
                 pr_info(" *** mtp | leader client[%d] to rs[%d] receiving "
@@ -254,26 +257,67 @@ resend:
                                 if(memcmp(in_msg+5, "BFLT", 4) == 0)
                                 {
                                         ret = 
-                                        leader_client_send(conn_socket, \
-                                        src_rs->rs_bitmap, src_rs->rs_bmap_size,\
-                                        MSG_DONTWAIT, 1);
+                                        leader_client_send(conn_socket,\
+                                                           src_rs->rs_bitmap,\
+                                                           src_rs->rs_bmap_size,\
+                                                           MSG_DONTWAIT, 1);
 
                                         pr_info(" *** mtp | leader client[%d] "
-                                                "to rs[%d] succefully sent: %d "
-                                                "bytes | "
+                                                "to rs[%d] sent: %d bytes | "
                                                 "leader_client_fwd_filter *** \n",
                                                 lid, id, ret);
+
+                                        if(ret != src_rs->rs_bmap_size)
+                                        {
+                                                msleep(5000);
+                                                memset(out_msg, 0, len+1);        
+                                                strcat(out_msg, "FAIL");
+                                                ret = 
+                                                leader_client_send(conn_socket,\
+                                                                out_msg,\
+                                                                strlen(out_msg),\
+                                                                MSG_DONTWAIT, 0);
+                                        }
+                                        goto fwd_bflt_wait;
                                 }
-                                goto success; 
+                        }
+                        else if(memcmp(in_msg, "FAIL", 4) == 0)
+                        {
+                                if(memcmp(in_msg+5, "BFLT", 4) == 0)
+                                {
+                                        if(attempts == 1)
+                                                goto fwd_bflt_fail;
+
+                                        /*
+                                         * this retry can be moved to place of
+                                         * invocation of
+                                         * leader_client_fwd_filter function,
+                                         * rather than handling it here, as it
+                                         * was done in normal remote server client
+                                         */
+                                        attempts++;
+                                        pr_info(" *** mtp | leader client[%d] to "
+                                                "rs[%d] re-sending FWD:BFLT | " 
+                                                "leader_client_fwd_filter *** \n",
+                                                lid, id);
+
+                                        goto fwd_bflt_resend;
+                                }
+                        
+                        }
+                        else if(memcmp(in_msg, "DONE", 4) == 0)            
+                        {                                                   
+                                if(memcmp(in_msg+5, "BFLT", 4) == 0)
+                                {
+                                        pr_info(" *** mtp | leader client[%d] to"
+                                                " rs[%d] FWD:BFLT success | "
+                                                "leader_client_fwd_filter ***\n",
+                                                lid, id);
+                                }
                         }
                         else
                         {
-                                pr_info(" *** mtp | leader client[%d] to "
-                                        "rs[%d] re-sending FWD:BFLT | " 
-                                        "leader_client_fwd_filter *** \n",
-                                        lid, id);
-                                /*should I really resend the bflt?*/
-                                goto resend;
+                                goto fwd_bflt_fail;
                         }
                 }
         }
@@ -281,16 +325,19 @@ resend:
         {
                 pr_info(" *** mtp | leader client[%d] to rs[%d] FWD:BFLT "
                         "failed | leader_client_fwd_filter ***\n", lid, id);
-                goto fail;
+                goto fwd_bflt_fail;
         }
 
-success:
         return 0;
-fail:
+
+fwd_bflt_fail:
+        pr_info(" *** mtp | leader client[%d] to rs[%d] FWD:BFLT "
+                "failed | leader_client_fwd_filter ***\n", lid, id);
         return -1;
 }
 
-//int leader_client_connect(struct socket *conn_socket, int id, char *dip, int port)
+//int leader_client_connect(struct socket *conn_socket, int id, char *dip,
+//int port)
 int leader_client_connect(struct remote_server *rs)
 {
         struct socket *conn_socket;
@@ -350,8 +397,8 @@ int leader_client_connect(struct remote_server *rs)
         saddr.sin_addr.s_addr = htonl(create_addr_from_str(ip));
         kfree(ip);
 
-        ret = conn_socket->ops->connect(conn_socket, (struct sockaddr *)&saddr\
-                        , sizeof(saddr), O_RDWR);
+        ret = conn_socket->ops->connect(conn_socket, (struct sockaddr *)&saddr,\
+                                        sizeof(saddr), O_RDWR);
         
         pr_info("connection attempt return value: %d\n", ret);
 
@@ -401,9 +448,10 @@ void leader_client_exit(struct socket *conn_socket)
                 tcp_client_receive(conn_socket, response);
                 add_wait_queue(&conn_socket->sk->sk_wq->wait, &exit_wait)
                 */
-         wait_event_timeout(exit_wait,\
-                         !skb_queue_empty(&conn_socket->sk->sk_receive_queue),\
-                                                                        5*HZ);
+        wait_event_timeout(exit_wait,\
+                           !skb_queue_empty(&conn_socket->sk->sk_receive_queue),
+                           5*HZ);
+
         if(!skb_queue_empty(&conn_socket->sk->sk_receive_queue))
         {
                 memset(&response, 0, len+1);

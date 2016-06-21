@@ -29,7 +29,10 @@ struct remote_server
 extern u32 create_address(u8 *);
 extern u32 create_addr_from_str(char *);
 extern char *(inet_ntoa)(struct in_addr *);
-extern int leader_client_fwd_filter(struct remote_server *, struct remote_server *);
+extern int leader_client_fwd_filter(struct remote_server *,\
+                                    struct remote_server *);
+extern void leader_client_inform_others(struct remote_server *,\
+                                       struct remote_server *);
 extern int leader_client_connect(struct remote_server *);
 extern void leader_client_exit(struct socket *);
 #endif

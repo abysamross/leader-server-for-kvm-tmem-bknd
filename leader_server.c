@@ -32,7 +32,7 @@ MODULE_AUTHOR("Aby Sam Ross");
 static int tcp_listener_stopped = 0;
 static int tcp_acceptor_stopped = 0;
 
-DEFINE_SPINLOCK(tcp_server_lock);
+//DEFINE_RWLOCK(rs_rwspinlock);
 static DECLARE_RWSEM(rs_rwmutex);
 
 LIST_HEAD(rs_head);
@@ -172,20 +172,21 @@ read_again:
                  */
                 if(len > 0)
                 {
-                        pr_info("len: %d\n", len);
+                        //pr_info("len: %d\n", len);
                         if((len == 4) && (memcmp(buf+totread, "FAIL", 4) == 0))
                                 goto recv_out;
                         totread += len;
-                        pr_info("total read: %d\n", totread);
+                        //pr_info("total read: %d\n", totread);
                         left -= len;
-                        pr_info("left: %d\n", left);
+                        //pr_info("left: %d\n", left);
                         if(left)
                                 goto read_again;
                 }
         }
         //len = msg.msg_iter.kvec->iov_len;
 recv_out:
-        pr_info("returning from receive\n");
+        pr_info(" *** mtp | return from receive after reading total: %d bytes, "
+                "last read: %d bytes | tcp_client_send \n", totread, len);
         return totread?totread:len;
 }
 
@@ -214,6 +215,8 @@ struct remote_server *register_rs(struct socket *socket,\
         if(!rs)
                 return NULL;
 
+        memset(rs, 0, sizeof(struct remote_server));
+
         kstrtoint(conn->in_buf, 10, &(rs->rs_port));
         rs->lcc_socket = socket; 
         //rs->rs_ip = inet_ntoa(&(address->sin_addr));
@@ -232,25 +235,34 @@ struct remote_server *register_rs(struct socket *socket,\
                 rs->rs_id, rs->rs_ip, rs->rs_port);
 
         down_write(&rs_rwmutex);
+        //write_lock(&rs_rwspinlock);
         list_add_tail(&(rs->rs_list), &(rs_head));
+        //write_unlock(&rs_rwspinlock);
         up_write(&rs_rwmutex);
 
         return rs;
 }
 
-void fwd_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
+void inform_others(struct tcp_conn_handler_data *conn, struct remote_server *rs)
 {
         struct remote_server *rs_tmp;
 
         down_read(&rs_rwmutex);
+        //read_lock(&rs_rwspinlock);
         if(!(list_empty(&rs_head)))
         {
             list_for_each_entry(rs_tmp, &(rs_head), rs_list)
             {
                     char *ip;
                     int p;
+                    /* 
+                     * I think I should make a local copy here of the rs_tmp, so
+                     * that even if that guy quits and goes, I will have a
+                     * referece to him.
+                     */
 
                     up_read(&rs_rwmutex);
+                    //read_unlock(&rs_rwspinlock);
 
                     ip =
                     inet_ntoa(&(rs_tmp->rs_addr->sin_addr));
@@ -259,9 +271,53 @@ void fwd_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
 
                     pr_info("*** mtp | leader server[%d] remote server info:\n"
                             "id-> %d | ip-> %s | port-> %d | address-> %s:%d |\n"
-                            "receive_and_fwd_bflt *** \n",
+                            "inform_others *** \n",
                             conn->thread_id, rs_tmp->rs_id, rs_tmp->rs_ip, 
-                            rs_tmp->rs_port, conn->ip, p);
+                            rs_tmp->rs_port, ip, p);
+
+                    if(rs_tmp->rs_id != conn->thread_id)
+                    {
+                        leader_client_inform_others(rs_tmp, rs);
+                    }
+                    kfree(ip);
+                    down_read(&rs_rwmutex);
+            }
+        }
+        up_read(&rs_rwmutex);
+        //read_unlock(&rs_rwspinlock);
+}
+
+void fwd_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
+{
+        struct remote_server *rs_tmp;
+
+        down_read(&rs_rwmutex);
+        //read_lock(&rs_rwspinlock);
+        if(!(list_empty(&rs_head)))
+        {
+            list_for_each_entry(rs_tmp, &(rs_head), rs_list)
+            {
+                    char *ip;
+                    int p;
+
+                    /* 
+                     * I think I should make a local copy here of the rs_tmp, so
+                     * that even if that guy quits and goes, I will have a
+                     * referece to him.
+                     */
+                    up_read(&rs_rwmutex);
+                    //read_unlock(&rs_rwspinlock);
+
+                    ip =
+                    inet_ntoa(&(rs_tmp->rs_addr->sin_addr));
+
+                    p = ntohs(rs_tmp->rs_addr->sin_port);
+
+                    pr_info("*** mtp | leader server[%d] remote server info:\n"
+                            "id-> %d | ip-> %s | port-> %d | address-> %s:%d |\n"
+                            "fwd_bflt *** \n",
+                            conn->thread_id, rs_tmp->rs_id, rs_tmp->rs_ip, 
+                            rs_tmp->rs_port, ip, p);
 
                     if(rs_tmp->rs_id != conn->thread_id)
                     {
@@ -286,10 +342,12 @@ void fwd_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
                         leader_client_fwd_filter(rs_tmp, rs);
                     }
                     kfree(ip);
+                    down_read(&rs_rwmutex);
             }
         }
-        else
-                up_read(&rs_rwmutex);
+        up_read(&rs_rwmutex);
+        //read_unlock(&rs_rwspinlock);
+        
         /*
          * ucomment the 2 lines depending on
          * whether you want to keep the blft
@@ -307,23 +365,29 @@ void fwd_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
 int receive_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
 {
         int len = 49;
-        char out_buf[len+1];
         int ret = 0;
-        //int tot_ret = 0;
-        //char in_buf[len+1];
-        //struct bloom_filter *bflt;
-        unsigned long *bitmap;
         int bmap_bits_size = 0;
         int bmap_bytes_size = 0;
-        //int n_pages = 0;
+        int i = 0;
+        char out_buf[len+1];
         void *vaddr;
-        int i=0;
+        unsigned long *bitmap;
+        /*
+        char *tmp;
+        int tot_ret = 0;
+        char in_buf[len+1];
+        struct bloom_filter *bflt;
+        int n_pages = 0;
         
-
+        kstrtoint(conn->in_buf+4, 10, &bmap_bits_size);
+        tmp = strsep(&(conn->in_buf), ":");
+        kstrtoint(tmp, 10, &bmap_bits_size);
+        */
+        pr_info(" *** mtp | in_buf: %s | receive_bflt \n", conn->in_buf);
         kstrtoint(conn->in_buf+10, 10, &bmap_bits_size);
-
         bmap_bytes_size = BITS_TO_LONGS(bmap_bits_size)*sizeof(unsigned long);
-        //n_pages = (bmap_bytes_size + PAGE_SIZE - 1)/PAGE_SIZE;
+        pr_info(" *** mtp | bmap bits size: %d, bmap bytes size: %d | "
+                "receive_bflt \n", bmap_bits_size, bmap_bytes_size);
 
         bitmap = vmalloc(bmap_bytes_size);
         memset(bitmap, 0, bmap_bytes_size);
@@ -335,7 +399,7 @@ int receive_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
         if(!bitmap)
         {
                 pr_info(" *** mtp | failed to allocate memory for bflt of "
-                        "rs[%d] | receive_and_fwd_bflt *** \n", conn->thread_id);
+                        "rs[%d] | receive_bflt *** \n", conn->thread_id);
                 goto recv_bflt_out;
         }
         /* announce that you are ready
@@ -345,7 +409,7 @@ int receive_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
         strcat(out_buf, "SEND:BFLT");
 
         pr_info(" *** mtp | leader server[%d] sending response: %s to: %s:%d |"
-                "receive_and_fwd_bflt *** \n", 
+                "receive_bflt *** \n", 
                 conn->thread_id, out_buf, conn->ip, conn->port);
         
         tcp_server_send(conn->accept_socket, out_buf, strlen(out_buf),\
@@ -358,7 +422,7 @@ int receive_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
                            MSG_DONTWAIT, 1);
 
         pr_info(" *** mtp | leader server[%d] received bitmap (size: %d) of "
-                "rs[%d] | receive_and_fwd_bflt *** \n",
+                "rs[%d] | receive_bflt *** \n",
                 conn->thread_id, ret, rs->rs_id);
 
         if( ret != bmap_bytes_size)
@@ -369,7 +433,7 @@ int receive_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
 
         pr_info(" *** mtp | leader server[%d] testing received bitmap of "
                 "rs[%d]\n bitmap[0]: %d, bitmap[10]: %d |\n "
-                "receive_and_fwd_bflt *** \n",
+                "receive_bflt *** \n",
                 conn->thread_id, rs->rs_id,
                 test_bit(0, bitmap), test_bit(10, bitmap));
 
@@ -431,10 +495,15 @@ int create_and_register_rs(struct socket **socket, struct remote_server **rsp,\
                       err, conn->thread_id);
 
               down_write(&rs_rwmutex);
-              list_del_init(&(rs->rs_list));
-              up_write(&rs_rwmutex);
-              kfree(rs->rs_ip);
+              //write_lock(&rs_rwspinlock);
+              if(!list_empty(&rs_head))
+                      list_del_init(&(rs->rs_list));
+               //kfree(rs->rs_ip);
+              if(rs->rs_bitmap != NULL)
+                       vfree(rs->rs_bitmap);
               kfree(rs);
+              //write_unlock(&rs_rwspinlock);
+              up_write(&rs_rwmutex);
               goto fail;
         }
         *rsp = rs;
@@ -507,6 +576,19 @@ int connection_handler(void *data)
                               __set_current_state(TASK_RUNNING);
                               remove_wait_queue(&accept_socket->sk->sk_wq->wait,\
                                                 &recv_wait);
+                              down_write(&rs_rwmutex);
+                              //write_lock(&rs_rwspinlock);
+                              if(rs != NULL)
+                              {
+                                      if(!list_empty(&rs_head))
+                                              list_del_init(&(rs->rs_list));
+                                      //kfree(rs->rs_ip);
+                                      if(rs->rs_bitmap != NULL)
+                                              vfree(rs->rs_bitmap);
+                                      kfree(rs);
+                              }
+                              //write_unlock(&rs_rwspinlock);
+                              up_write(&rs_rwmutex);
                               kfree(tcp_conn_handler->data[id]->address);
                               kfree(tcp_conn_handler->data[id]->ip);
                               kfree(tcp_conn_handler->data[id]);
@@ -618,6 +700,8 @@ regresp:
                                               "%s:%d | connection_handler ***\n",
                                               id, ip, port);
 
+                                      conn_data->in_buf = in_buf;
+
                                       if(receive_bflt(conn_data, rs) < 0)
                                               goto bfltfail;
 
@@ -673,20 +757,17 @@ bfltresp:
                       }
                       else if(memcmp(in_buf, "ADIOS", 5) == 0)
                       {
-                              //char *tmp;
-                              //int port;
-
-                              //tmp = inet_ntoa(&(address->sin_addr));
-                              //port = ntohs(address->sin_port);
-                              if(!rs)
+                              /* 
+                               * the leader server should make sure that when an
+                               * rs quits, he informs the others to remove this
+                               * rs from their records
+                              if(rs)
                               {
                                 down_write(&rs_rwmutex);
                                 list_del_init(&(rs->rs_list));
                                 up_write(&rs_rwmutex);
-                                kfree(rs->rs_ip);
-                                kfree(rs);
                               }
-
+                               */
                               memset(out_buf, 0, len+1);
                               strcat(out_buf, "ADIOSAMIGO");
 
@@ -697,6 +778,11 @@ bfltresp:
 
                               tcp_server_send(accept_socket, out_buf,\
                                               strlen(out_buf), MSG_DONTWAIT);
+                              if(rs)
+                              {
+                                      conn_data->in_buf = in_buf;
+                                      inform_others(conn_data, rs);
+                              }
                               break;
                       }
 
@@ -710,11 +796,31 @@ bfltresp:
                        id, tmp, ntohs(address->sin_port));
        kfree(tmp);
        */
+       
+       /*
+        * whent this thread exits shouldn't the rs associated with also be
+        * removed. The rs, its bitmap, ip...to free up the memory allocated to
+        * them.
+        */
 
 out:
+       down_write(&rs_rwmutex);
+       //write_lock(&rs_rwspinlock);
+       if(rs != NULL)
+       {
+               if(!list_empty(&rs_head))
+                       list_del_init(&(rs->rs_list));
+               //kfree(rs->rs_ip);
+               if(rs->rs_bitmap != NULL)
+                       vfree(rs->rs_bitmap);
+               kfree(rs);
+       }
+       //write_unlock(&rs_rwspinlock);
+       up_write(&rs_rwmutex);
+
        if(lc_conn_socket)
        {
-         pr_info(" *** mtp | closing leader client[%d] connection\n | "
+         pr_info(" *** mtp | closing leader client[%d] connection | "
                  "connection_handler *** \n", id);
 
          leader_client_exit(lc_conn_socket);
@@ -942,7 +1048,7 @@ int tcp_server_accept(void)
                tcp_conn_handler->tcp_conn_handler_stopped[id] = 0;
                tcp_conn_handler->data[id] = data;
                tcp_conn_handler->thread[id] = 
-               kthread_run((void *)connection_handler, (void *)data,MODULE_NAME);
+               kthread_run((void *)connection_handler, (void *)data,"leader_connection_handler");
 
                if(kthread_should_stop())
                {
@@ -1041,7 +1147,7 @@ int tcp_server_listen(void)
         }
 
         tcp_server->accept_thread = 
-        kthread_run((void*)tcp_server_accept, NULL, MODULE_NAME);
+        kthread_run((void*)tcp_server_accept, NULL, "leader_server_accept");
 
         while(1)
         {
@@ -1080,7 +1186,7 @@ int tcp_server_start(void)
 {
         tcp_server->running = 1;
         tcp_server->thread = kthread_run((void *)tcp_server_listen, NULL,\
-                                         MODULE_NAME);
+                                         "leader_server_listen");
         if(tcp_listener_stopped)
                 return -1;
 

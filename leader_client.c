@@ -158,18 +158,49 @@ read_again:
         return len;
 }
 
-
-/*
-int tcp_client_fwd_page(struct *page)
+void leader_client_inform_others(struct remote_server *dest_rs,
+                                 struct remote_server *src_rs)
 {
-       send(page); 
-       receive(response);
+        int len = 49;
+        int id;
+        int lid;
+        int port;
+        int ret;
+        char out_msg[len+1]; 
+        char *ip;
+        struct socket *conn_socket;
+
+        conn_socket = dest_rs->lcc_socket;
+        id = dest_rs->rs_id;
+        ip = dest_rs->rs_ip;
+        port = dest_rs->rs_port;
+        lid = src_rs->rs_id;
+
+inform_retry:
+
+        memset(out_msg, 0, len+1);
+        snprintf(out_msg, sizeof(out_msg), "QUIT:%s:%d",\
+                 src_rs->rs_ip, src_rs->rs_port);
+
+        pr_info(" *** mtp | leader client[%d] to rs[%d] sending %s to "
+                "%s:%d | leader_client_fwd_filter ***\n",
+                lid, id, out_msg, ip, port);
+
+        ret = leader_client_send(conn_socket, out_msg, strlen(out_msg),\
+                                 MSG_DONTWAIT, 0);
+
+        pr_info(" *** mtp | leader client[%d] to rs[%d] succefully sent: %d "
+                "bytes | leader_client_fwd_filter ***\n",
+                lid, id, ret);
+
+        if(ret != strlen(out_msg))
+                goto inform_retry;
 }
-*/
+
 //int leader_client_fwd_filter(struct socket *conn_socket, int id, char *ip,
 //int port /*,struct *bloom_filter)*/)
-int leader_client_fwd_filter(struct remote_server *dest_rs,\
-                struct remote_server *src_rs)
+int leader_client_fwd_filter(struct remote_server *dest_rs, 
+                             struct remote_server *src_rs)
 {
         int lid;
         struct socket *conn_socket;
@@ -207,6 +238,7 @@ int leader_client_fwd_filter(struct remote_server *dest_rs,\
                tmp = inet_ntoa(&(rs_addr->sin_addr));
 
 fwd_bflt_resend:
+
         pr_info(" *** mtp | leader client[%d] to rs[%d] sending BFLT to "
                 "%s:%d | leader_client_fwd_filter ***\n",
                 lid, id, ip, port);
@@ -235,7 +267,7 @@ fwd_bflt_wait:
 
         wait_event_timeout(bflt_wait,\
                            !skb_queue_empty(&conn_socket->sk->sk_receive_queue),\
-                           5*HZ);
+                           10*HZ);
         if(!skb_queue_empty(&conn_socket->sk->sk_receive_queue))
         {
                 pr_info(" *** mtp | leader client[%d] to rs[%d] receiving "
@@ -303,7 +335,6 @@ fwd_bflt_wait:
 
                                         goto fwd_bflt_resend;
                                 }
-                        
                         }
                         else if(memcmp(in_msg, "DONE", 4) == 0)            
                         {                                                   
@@ -400,7 +431,8 @@ int leader_client_connect(struct remote_server *rs)
         ret = conn_socket->ops->connect(conn_socket, (struct sockaddr *)&saddr,\
                                         sizeof(saddr), O_RDWR);
         
-        pr_info("connection attempt return value: %d\n", ret);
+        pr_info(" *** mtp | connection attempt return value: %d | "
+                "leader_client_connect \n", ret);
 
         if(ret && (ret != -EINPROGRESS))
         {

@@ -253,6 +253,7 @@ fwd_bflt_resend:
                 kfree(tmp);
 
         memset(out_msg, 0, len+1);
+
         snprintf(out_msg, sizeof(out_msg), "RECV:BFLT:%s:%d:%d",\
                  src_rs->rs_ip, src_rs->rs_port, src_rs->rs_bmap_size);
 
@@ -288,10 +289,13 @@ fwd_bflt_wait:
                         {
                                 if(memcmp(in_msg+5, "BFLT", 4) == 0)
                                 {
+                                        int bmap_byte_size = 
+                                        BITS_TO_LONGS(src_rs->rs_bmap_size)*sizeof(unsigned long);
+                                        
                                         ret = 
                                         leader_client_send(conn_socket,\
                                                            src_rs->rs_bitmap,\
-                                                           src_rs->rs_bmap_size,\
+                                                           bmap_byte_size,\
                                                            MSG_DONTWAIT, 1);
 
                                         pr_info(" *** mtp | leader client[%d] "
@@ -299,7 +303,7 @@ fwd_bflt_wait:
                                                 "leader_client_fwd_filter *** \n",
                                                 lid, id, ret);
 
-                                        if(ret != src_rs->rs_bmap_size)
+                                        if(ret != bmap_byte_size)
                                         {
                                                 msleep(5000);
                                                 memset(out_msg, 0, len+1);        

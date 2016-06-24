@@ -32,8 +32,8 @@ MODULE_AUTHOR("Aby Sam Ross");
 static int tcp_listener_stopped = 0;
 static int tcp_acceptor_stopped = 0;
 
-//DEFINE_RWLOCK(rs_rwspinlock);
-static DECLARE_RWSEM(rs_rwmutex);
+//static DECLARE_RWSEM(rs_rwmutex);
+static DEFINE_RWLOCK(rs_rwspinlock);
 
 LIST_HEAD(rs_head);
 
@@ -234,11 +234,11 @@ struct remote_server *register_rs(struct socket *socket,\
                 "register_rs ***\n",
                 rs->rs_id, rs->rs_ip, rs->rs_port);
 
-        down_write(&rs_rwmutex);
-        //write_lock(&rs_rwspinlock);
+        //down_write(&rs_rwmutex);
+        write_lock(&rs_rwspinlock);
         list_add_tail(&(rs->rs_list), &(rs_head));
-        //write_unlock(&rs_rwspinlock);
-        up_write(&rs_rwmutex);
+        write_unlock(&rs_rwspinlock);
+        //up_write(&rs_rwmutex);
 
         return rs;
 }
@@ -247,8 +247,8 @@ void inform_others(struct tcp_conn_handler_data *conn, struct remote_server *rs)
 {
         struct remote_server *rs_tmp;
 
-        down_read(&rs_rwmutex);
-        //read_lock(&rs_rwspinlock);
+        //down_read(&rs_rwmutex);
+        read_lock(&rs_rwspinlock);
         if(!(list_empty(&rs_head)))
         {
             list_for_each_entry(rs_tmp, &(rs_head), rs_list)
@@ -261,8 +261,8 @@ void inform_others(struct tcp_conn_handler_data *conn, struct remote_server *rs)
                      * referece to him.
                      */
 
-                    up_read(&rs_rwmutex);
-                    //read_unlock(&rs_rwspinlock);
+                    //up_read(&rs_rwmutex);
+                    read_unlock(&rs_rwspinlock);
 
                     ip =
                     inet_ntoa(&(rs_tmp->rs_addr->sin_addr));
@@ -280,19 +280,20 @@ void inform_others(struct tcp_conn_handler_data *conn, struct remote_server *rs)
                         leader_client_inform_others(rs_tmp, rs);
                     }
                     kfree(ip);
-                    down_read(&rs_rwmutex);
+                    read_lock(&rs_rwspinlock);
+                    //down_read(&rs_rwmutex);
             }
         }
-        up_read(&rs_rwmutex);
-        //read_unlock(&rs_rwspinlock);
+        read_unlock(&rs_rwspinlock);
+        //up_read(&rs_rwmutex);
 }
 
 void fwd_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
 {
         struct remote_server *rs_tmp;
 
-        down_read(&rs_rwmutex);
-        //read_lock(&rs_rwspinlock);
+        //down_read(&rs_rwmutex);
+        read_lock(&rs_rwspinlock);
         if(!(list_empty(&rs_head)))
         {
             list_for_each_entry(rs_tmp, &(rs_head), rs_list)
@@ -305,8 +306,8 @@ void fwd_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
                      * that even if that guy quits and goes, I will have a
                      * referece to him.
                      */
-                    up_read(&rs_rwmutex);
-                    //read_unlock(&rs_rwspinlock);
+                    //up_read(&rs_rwmutex);
+                    read_unlock(&rs_rwspinlock);
 
                     ip =
                     inet_ntoa(&(rs_tmp->rs_addr->sin_addr));
@@ -342,11 +343,12 @@ void fwd_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
                         leader_client_fwd_filter(rs_tmp, rs);
                     }
                     kfree(ip);
-                    down_read(&rs_rwmutex);
+                    read_lock(&rs_rwspinlock);
+                    //down_read(&rs_rwmutex);
             }
         }
-        up_read(&rs_rwmutex);
-        //read_unlock(&rs_rwspinlock);
+        read_unlock(&rs_rwspinlock);
+        //up_read(&rs_rwmutex);
         
         /*
          * ucomment the 2 lines depending on
@@ -384,12 +386,16 @@ int receive_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
         kstrtoint(tmp, 10, &bmap_bits_size);
         */
         pr_info(" *** mtp | in_buf: %s | receive_bflt \n", conn->in_buf);
+        
         kstrtoint(conn->in_buf+10, 10, &bmap_bits_size);
+
         bmap_bytes_size = BITS_TO_LONGS(bmap_bits_size)*sizeof(unsigned long);
+
         pr_info(" *** mtp | bmap bits size: %d, bmap bytes size: %d | "
                 "receive_bflt \n", bmap_bits_size, bmap_bytes_size);
 
         bitmap = vmalloc(bmap_bytes_size);
+
         memset(bitmap, 0, bmap_bytes_size);
         
         for(i = 0; i < bmap_bits_size; i++)
@@ -444,7 +450,8 @@ int receive_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
         if(rs->rs_bitmap != NULL)
                 vfree(rs->rs_bitmap);
         
-        rs->rs_bmap_size = bmap_bytes_size; 
+        //rs->rs_bmap_size = bmap_bytes_size; 
+        rs->rs_bmap_size = bmap_bits_size; 
         rs->rs_bitmap = bitmap;
 
         return 0;
@@ -494,16 +501,16 @@ int create_and_register_rs(struct socket **socket, struct remote_server **rsp,\
                       " connection_handler[%d] *** \n",
                       err, conn->thread_id);
 
-              down_write(&rs_rwmutex);
-              //write_lock(&rs_rwspinlock);
+              //down_write(&rs_rwmutex);
+              write_lock(&rs_rwspinlock);
               if(!list_empty(&rs_head))
                       list_del_init(&(rs->rs_list));
                //kfree(rs->rs_ip);
               if(rs->rs_bitmap != NULL)
                        vfree(rs->rs_bitmap);
               kfree(rs);
-              //write_unlock(&rs_rwspinlock);
-              up_write(&rs_rwmutex);
+              write_unlock(&rs_rwspinlock);
+              //up_write(&rs_rwmutex);
               goto fail;
         }
         *rsp = rs;
@@ -576,8 +583,8 @@ int connection_handler(void *data)
                               __set_current_state(TASK_RUNNING);
                               remove_wait_queue(&accept_socket->sk->sk_wq->wait,\
                                                 &recv_wait);
-                              down_write(&rs_rwmutex);
-                              //write_lock(&rs_rwspinlock);
+                              //down_write(&rs_rwmutex);
+                              write_lock(&rs_rwspinlock);
                               if(rs != NULL)
                               {
                                       if(!list_empty(&rs_head))
@@ -587,8 +594,8 @@ int connection_handler(void *data)
                                               vfree(rs->rs_bitmap);
                                       kfree(rs);
                               }
-                              //write_unlock(&rs_rwspinlock);
-                              up_write(&rs_rwmutex);
+                              write_unlock(&rs_rwspinlock);
+                              //up_write(&rs_rwmutex);
                               kfree(tcp_conn_handler->data[id]->address);
                               kfree(tcp_conn_handler->data[id]->ip);
                               kfree(tcp_conn_handler->data[id]);
@@ -804,8 +811,8 @@ bfltresp:
         */
 
 out:
-       down_write(&rs_rwmutex);
-       //write_lock(&rs_rwspinlock);
+       //down_write(&rs_rwmutex);
+       write_lock(&rs_rwspinlock);
        if(rs != NULL)
        {
                if(!list_empty(&rs_head))
@@ -815,8 +822,8 @@ out:
                        vfree(rs->rs_bitmap);
                kfree(rs);
        }
-       //write_unlock(&rs_rwspinlock);
-       up_write(&rs_rwmutex);
+       write_unlock(&rs_rwspinlock);
+       //up_write(&rs_rwmutex);
 
        if(lc_conn_socket)
        {

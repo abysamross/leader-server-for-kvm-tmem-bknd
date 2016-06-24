@@ -290,7 +290,7 @@ fwd_bflt_wait:
                                 if(memcmp(in_msg+5, "BFLT", 4) == 0)
                                 {
                                         int bmap_byte_size = 
-                                        BITS_TO_LONGS(src_rs->rs_bmap_size)*sizeof(unsigned long);
+                      BITS_TO_LONGS(src_rs->rs_bmap_size)*sizeof(unsigned long);
                                         
                                         ret = 
                                         leader_client_send(conn_socket,\

@@ -153,7 +153,7 @@ read_again:
         }
 
 
-        pr_info(" *** mtp | the server says: %s | tcp_client_receive *** \n",str);
+        pr_info(" *** mtp | the server says: %s | leader_client_receive *** \n",str);
         //set_fs(oldmm);
         return len;
 }
@@ -203,18 +203,19 @@ int leader_client_fwd_filter(struct remote_server *dest_rs,
                              struct remote_server *src_rs)
 {
         int lid;
-        struct socket *conn_socket;
         int id;
-        char *ip;
         int port;
         int len = 49;
-        char in_msg[len+1];
-        char out_msg[len+1];
         int ret;
         int attempts = 0;
-        struct sockaddr_in *rs_addr;
-        char *tmp = NULL;
         int addr_len;
+        unsigned long jleft;
+        char in_msg[len+1];
+        char out_msg[len+1];
+        char *ip;
+        char *tmp = NULL;
+        struct socket *conn_socket;
+        struct sockaddr_in *rs_addr;
 
         DECLARE_WAIT_QUEUE_HEAD(bflt_wait);
 
@@ -242,6 +243,7 @@ fwd_bflt_resend:
         pr_info(" *** mtp | leader client[%d] to rs[%d] sending BFLT to "
                 "%s:%d | leader_client_fwd_filter ***\n",
                 lid, id, ip, port);
+
         if( ret >= 0)
         {
                 pr_info(" *** mtp | leader client[%d] to rs[%d] details: \n"
@@ -266,16 +268,22 @@ fwd_bflt_resend:
 
 fwd_bflt_wait:
 
+        jleft = 
         wait_event_timeout(bflt_wait,\
-                           !skb_queue_empty(&conn_socket->sk->sk_receive_queue),\
+                           (skb_queue_empty(&conn_socket->sk->sk_receive_queue) == 0),\
                            10*HZ);
         if(!skb_queue_empty(&conn_socket->sk->sk_receive_queue))
         {
+                pr_info(" *** mtp | wait_event_timeout returned: %lu, secs left"
+                        ": %lu | leader_client_fwd_filter *** \n",
+                        jleft, jleft/HZ);
+
                 pr_info(" *** mtp | leader client[%d] to rs[%d] receiving "
                         "message from: %s:%d | leader_client_fwd_filter ***\n",
                         lid, id, ip, port);
 
                 memset(in_msg, 0, len+1);
+
                 ret = leader_client_receive(conn_socket, in_msg, MSG_DONTWAIT);
 
                 pr_info(" *** mtp | leader client[%d] to rs[%d] received "
@@ -467,6 +475,7 @@ int network_client_init(void)
 void leader_client_exit(struct socket *conn_socket)
 {
         int len = 49;
+        unsigned long jleft;
         char response[len+1];
         char reply[len+1];
 
@@ -474,6 +483,7 @@ void leader_client_exit(struct socket *conn_socket)
         DECLARE_WAIT_QUEUE_HEAD(exit_wait);
 
         memset(&reply, 0, len+1);
+
         strcat(reply, "ADIOS"); 
         //tcp_client_send(conn_socket, reply);
         leader_client_send(conn_socket, reply, strlen(reply), MSG_DONTWAIT, 0);
@@ -484,13 +494,18 @@ void leader_client_exit(struct socket *conn_socket)
                 tcp_client_receive(conn_socket, response);
                 add_wait_queue(&conn_socket->sk->sk_wq->wait, &exit_wait)
                 */
+        jleft = 
         wait_event_timeout(exit_wait,\
-                           !skb_queue_empty(&conn_socket->sk->sk_receive_queue),
+                           (skb_queue_empty(&conn_socket->sk->sk_receive_queue) == 0),
                            5*HZ);
 
         if(!skb_queue_empty(&conn_socket->sk->sk_receive_queue))
         {
+                pr_info(" *** mtp | wait_event_timeout returned: %lu, secs left"
+                        ": %lu | leader_client_exit *** \n", jleft, jleft/HZ);
+
                 memset(&response, 0, len+1);
+                
                 leader_client_receive(conn_socket, response, MSG_DONTWAIT);
                 //remove_wait_queue(&conn_socket->sk->sk_wq->wait, &exit_wait);
         }

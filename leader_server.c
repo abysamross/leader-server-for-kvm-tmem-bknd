@@ -21,6 +21,7 @@
 
 #include <linux/list.h>
 #include <linux/string.h>
+#include <linux/rwsem.h>
 #include "leader_tcp.h"
 #define DEFAULT_PORT 2325
 #define MODULE_NAME "tmem_tcp_server"
@@ -32,8 +33,8 @@ MODULE_AUTHOR("Aby Sam Ross");
 static int tcp_listener_stopped = 0;
 static int tcp_acceptor_stopped = 0;
 
-//static DECLARE_RWSEM(rs_rwmutex);
-static DEFINE_RWLOCK(rs_rwspinlock);
+static DECLARE_RWSEM(rs_rwmutex);
+//static DEFINE_RWLOCK(rs_rwspinlock);
 
 LIST_HEAD(rs_head);
 
@@ -133,7 +134,7 @@ int tcp_server_receive(struct socket *sock, void *rcv_buf,int size,\
 {
         struct msghdr msg;
         struct kvec vec;
-        int len, totread = 0, left = size;
+        int len, totread = 0, left = size, count = size;
         char *buf = NULL;
         //unsigned long *bitmap = NULL;
         
@@ -170,11 +171,34 @@ read_again:
                  * you should timeout somehow if you cannot get the entire bloom
                  * filter rather than simply looping around.
                  */
+                /* 
+                 * you should timeout somehow if you cannot get the entire bloom
+                 * filter rather than simply looping around.
+                 */
+                /*
+                 * count and comparison of buf with "FAIL"|"ADIOS" are ugly ways
+                 * of ensuring that a huge receive, a blft(32MB) or page(4KB),
+                 * doesn't loop forever.
+                 * comparison with "FAIL" is to safeguard against the other end
+                 * not being able to send entire size.
+                 * comparison with "ADIOS" is to safeguard against the other end
+                 * quitting in between; this most probably won't happen as the
+                 * other end will take care not to quit until and unless it
+                 * tries to send the size bytes.
+                 * count is to safeguard against an ungraceful exit of the other
+                 * end.
+                 */
+                if(count < 0)
+                        goto recv_out;
+
+                count--;
+
                 if(len > 0)
                 {
                         //pr_info("len: %d\n", len);
+                       //((len == 5) && (memcmp(buf+totread, "ADIOS", 4) == 0)))
                         if((len == 4) && (memcmp(buf+totread, "FAIL", 4) == 0))
-                                goto recv_out;
+                                        goto recv_out;
                         totread += len;
                         //pr_info("total read: %d\n", totread);
                         left -= len;
@@ -190,65 +214,48 @@ recv_out:
         return totread?totread:len;
 }
 
-//struct remote_server *register_rs(struct socket *socket, char* pkt,
-//                int id, struct sockaddr_in *address)
-struct remote_server *register_rs(struct socket *socket,\
-                                  struct tcp_conn_handler_data *conn) 
+struct remote_server* look_up_rs(char *ip, int port)
 {
-        struct remote_server *rs = NULL;
-        
-        char *tmp;
-        //int port;
-        //char *ip;
+        struct remote_server *rs_tmp;
 
-        tmp = strsep(&conn->in_buf, ":");
-        //ip = strsep(&pkt,":");
-        
-        if(strcmp(tmp, "REGRS") != 0)
+        down_read(&rs_rwmutex);
+        //read_lock(&rs_rwspinlock);
+        if(!(list_empty(&rs_head)))
         {
-                pr_info(" *** mtp | REGRS not in packet | register_rs ***\n");
-                return NULL;
+                list_for_each_entry(rs_tmp, &(rs_head), rs_list)
+                {
+                        //up_read(&rs_rwmutex);
+                        //read_unlock(&rs_rwspinlock);
+
+                        if(strcmp(rs_tmp->rs_ip, ip) == 0)
+                        {
+                                pr_info(" *** mtp | found remote server "
+                                        "info:\n | ip-> %s | port-> %d "
+                                        "| look_up_rs ***\n", 
+                                        rs_tmp->rs_ip, rs_tmp->rs_port);
+
+                                //read_unlock(&rs_rwspinlock);
+                                up_read(&rs_rwmutex);
+                                return rs_tmp;
+                        }
+
+                        //read_lock(&rs_rwspinlock);
+                        //down_read(&rs_rwmutex);
+                }
         }
+        //else
+        //read_unlock(&rs_rwspinlock);
+        up_read(&rs_rwmutex);
 
-        rs = kmalloc(sizeof(struct remote_server), GFP_KERNEL);
-
-        if(!rs)
-                return NULL;
-
-        memset(rs, 0, sizeof(struct remote_server));
-
-        kstrtoint(conn->in_buf, 10, &(rs->rs_port));
-        rs->lcc_socket = socket; 
-        //rs->rs_ip = inet_ntoa(&(address->sin_addr));
-        rs->rs_ip = conn->ip;
-        //rs->rs_ip = kmalloc(16 * sizeof(char), GFP_KERNEL);
-        //strcpy(rs->rs_ip, ip);
-        //kstrtoint(pkt, 10, &(rs->rs_port));
-
-        rs->rs_id = conn->thread_id;
-        rs->rs_addr = conn->address;
-        rs->rs_bitmap = NULL;
-        rs->rs_bmap_size = 0;
-        
-        pr_info(" *** mtp | registered remote server#: %d with ip: %s:%d | "
-                "register_rs ***\n",
-                rs->rs_id, rs->rs_ip, rs->rs_port);
-
-        //down_write(&rs_rwmutex);
-        write_lock(&rs_rwspinlock);
-        list_add_tail(&(rs->rs_list), &(rs_head));
-        write_unlock(&rs_rwspinlock);
-        //up_write(&rs_rwmutex);
-
-        return rs;
+        return NULL;
 }
 
 void inform_others(struct tcp_conn_handler_data *conn, struct remote_server *rs)
 {
         struct remote_server *rs_tmp;
 
-        //down_read(&rs_rwmutex);
-        read_lock(&rs_rwspinlock);
+        down_read(&rs_rwmutex);
+        //read_lock(&rs_rwspinlock);
         if(!(list_empty(&rs_head)))
         {
             list_for_each_entry(rs_tmp, &(rs_head), rs_list)
@@ -262,7 +269,7 @@ void inform_others(struct tcp_conn_handler_data *conn, struct remote_server *rs)
                      */
 
                     //up_read(&rs_rwmutex);
-                    read_unlock(&rs_rwspinlock);
+                    //read_unlock(&rs_rwspinlock);
 
                     ip =
                     inet_ntoa(&(rs_tmp->rs_addr->sin_addr));
@@ -275,25 +282,129 @@ void inform_others(struct tcp_conn_handler_data *conn, struct remote_server *rs)
                             conn->thread_id, rs_tmp->rs_id, rs_tmp->rs_ip, 
                             rs_tmp->rs_port, ip, p);
 
-                    if(rs_tmp->rs_id != conn->thread_id)
+                    /*
+                     * I should use rs->rs_id, instead of conn->thread_id.
+                     * Bcoz when inform_others() is called from within
+                     * register_rs() on detecting a duplicate entry in the RS
+                     * list, conn->thread_id will have the new thread_id
+                     * allocated to the new connection. But rs->rs_id will have
+                     * the correct old thread_id which we want.
+                     */
+                    //if(rs_tmp->rs_id != conn->thread_id)
+                    
+                    if(rs_tmp->rs_id != rs->rs_id)
                     {
                         leader_client_inform_others(rs_tmp, rs);
                     }
+
                     kfree(ip);
-                    read_lock(&rs_rwspinlock);
+
+                    //read_lock(&rs_rwspinlock);
                     //down_read(&rs_rwmutex);
             }
         }
-        read_unlock(&rs_rwspinlock);
-        //up_read(&rs_rwmutex);
+        //read_unlock(&rs_rwspinlock);
+        up_read(&rs_rwmutex);
 }
+
+//struct remote_server *register_rs(struct socket *socket, char* pkt,
+//                int id, struct sockaddr_in *address)
+struct remote_server *register_rs(struct socket *socket,\
+                                  struct tcp_conn_handler_data *conn) 
+{
+        int port;
+        int ret;
+        char *tmp;
+        char *ip;
+        struct remote_server *rs = NULL;
+
+        tmp = strsep(&conn->in_buf, ":");
+        //ip = strsep(&pkt,":");
+        
+        if(strcmp(tmp, "REGRS") != 0)
+        {
+                pr_info(" *** mtp | REGRS not in packet | register_rs ***\n");
+                return NULL;
+        }
+
+        ip = conn->ip;
+        kstrtoint(conn->in_buf, 10, &port);
+        
+        rs = look_up_rs(ip, port);
+
+        if(rs != NULL)
+        {
+                pr_info(" *** mtp | found an existing RS with ip: %s, id: %d. "
+                        "Deleting it and informing others | register_rs *** \n",
+                        rs->rs_ip, rs->rs_id);
+
+                inform_others(conn, rs);
+
+                if(tcp_conn_handler->thread[rs->rs_id] != NULL)
+                {
+
+                        if(!tcp_conn_handler->tcp_conn_handler_stopped[rs->rs_id])
+                        {
+                                ret = 
+                                kthread_stop(tcp_conn_handler->thread[rs->rs_id]);
+
+                                if(!ret)
+                                        pr_info(" *** mtp | tcp server "
+                                                "connection handler "
+                                                "thread: %d stopped | "
+                                                "register_rs "
+                                                "*** \n", rs->rs_id);
+                        }
+               }
+        }
+
+        rs = kmalloc(sizeof(struct remote_server), GFP_KERNEL);
+
+        if(!rs)
+                return NULL;
+
+        memset(rs, 0, sizeof(struct remote_server));
+
+        rs->lcc_socket = socket; 
+        //mutex_init(&rs->lcc_sock_mutex);
+        rs->rs_port = port;
+        rs->rs_ip = conn->ip;
+        //kstrtoint(conn->in_buf, 10, &(rs->rs_port));
+        //rs->rs_ip = conn->ip;
+
+        /*
+        rs->rs_ip = inet_ntoa(&(address->sin_addr));
+        rs->rs_ip = kmalloc(16 * sizeof(char), GFP_KERNEL);
+        strcpy(rs->rs_ip, ip);
+        kstrtoint(pkt, 10, &(rs->rs_port));
+        */
+
+        rs->rs_id = conn->thread_id;
+        rs->rs_addr = conn->address;
+        rs->rs_bitmap = NULL;
+        rs->rs_bmap_size = 0;
+        //rs->rs_status = RS_ALIVE;
+        
+        pr_info(" *** mtp | registered remote server#: %d with ip: %s:%d | "
+                "register_rs ***\n",
+                rs->rs_id, rs->rs_ip, rs->rs_port);
+
+        down_write(&rs_rwmutex);
+        //write_lock(&rs_rwspinlock);
+        list_add_tail(&(rs->rs_list), &(rs_head));
+        //write_unlock(&rs_rwspinlock);
+        up_write(&rs_rwmutex);
+
+        return rs;
+}
+
 
 void fwd_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
 {
         struct remote_server *rs_tmp;
 
-        //down_read(&rs_rwmutex);
-        read_lock(&rs_rwspinlock);
+        down_read(&rs_rwmutex);
+        //read_lock(&rs_rwspinlock);
         if(!(list_empty(&rs_head)))
         {
             list_for_each_entry(rs_tmp, &(rs_head), rs_list)
@@ -307,7 +418,7 @@ void fwd_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
                      * referece to him.
                      */
                     //up_read(&rs_rwmutex);
-                    read_unlock(&rs_rwspinlock);
+                    //read_unlock(&rs_rwspinlock);
 
                     ip =
                     inet_ntoa(&(rs_tmp->rs_addr->sin_addr));
@@ -343,12 +454,12 @@ void fwd_bflt(struct tcp_conn_handler_data *conn, struct remote_server *rs)
                         leader_client_fwd_filter(rs_tmp, rs);
                     }
                     kfree(ip);
-                    read_lock(&rs_rwspinlock);
+                    //read_lock(&rs_rwspinlock);
                     //down_read(&rs_rwmutex);
             }
         }
-        read_unlock(&rs_rwspinlock);
-        //up_read(&rs_rwmutex);
+        //read_unlock(&rs_rwspinlock);
+        up_read(&rs_rwmutex);
         
         /*
          * ucomment the 2 lines depending on
@@ -482,6 +593,12 @@ int create_and_register_rs(struct socket **socket, struct remote_server **rsp,\
         }
 
         //rs = register_rs(*socket, buf, id, address);
+        /*
+         * before registering make sure somebody with the same credentials
+         * doesn't exist. If so, either you remove it and ask others to remove
+         * it, Or deny registration,
+         * I am doing former inside register_rs.
+         */
         rs = register_rs(*socket, conn);
 
         if(rs == NULL)
@@ -502,16 +619,18 @@ int create_and_register_rs(struct socket **socket, struct remote_server **rsp,\
                       " connection_handler[%d] *** \n",
                       err, conn->thread_id);
 
-              //down_write(&rs_rwmutex);
-              write_lock(&rs_rwspinlock);
+              down_write(&rs_rwmutex);
+              //write_lock(&rs_rwspinlock);
               if(!list_empty(&rs_head))
                       list_del_init(&(rs->rs_list));
                //kfree(rs->rs_ip);
+              //write_unlock(&rs_rwspinlock);
               if(rs->rs_bitmap != NULL)
                        vfree(rs->rs_bitmap);
+              //rs->rs_status = RS_EXITING;
+              //mutex_unlock(&rs->rs_mutex);
               kfree(rs);
-              write_unlock(&rs_rwspinlock);
-              //up_write(&rs_rwmutex);
+              up_write(&rs_rwmutex);
               goto fail;
         }
         *rsp = rs;
@@ -584,29 +703,34 @@ int connection_handler(void *data)
                               __set_current_state(TASK_RUNNING);
                               remove_wait_queue(&accept_socket->sk->sk_wq->wait,\
                                                 &recv_wait);
-                              //down_write(&rs_rwmutex);
-                              write_lock(&rs_rwspinlock);
+                              
+                              //write_lock(&rs_rwspinlock);
+
+                              down_write(&rs_rwmutex);
                               if(rs != NULL)
                               {
+
                                       if(!list_empty(&rs_head))
                                               list_del_init(&(rs->rs_list));
-                                      //kfree(rs->rs_ip);
+                                      
+                                      /* putting client exit under write lock is
+                                       * fine as I wouldn't want anybody around 
+                                       * as I am looking to quit*/
+
+                                      leader_client_exit(rs);
+
                                       if(rs->rs_bitmap != NULL)
                                               vfree(rs->rs_bitmap);
+                                      
                                       kfree(rs);
                               }
-                              write_unlock(&rs_rwspinlock);
+                              up_write(&rs_rwmutex);
+                                      
                               //up_write(&rs_rwmutex);
                               kfree(tcp_conn_handler->data[id]->address);
                               kfree(tcp_conn_handler->data[id]->ip);
                               kfree(tcp_conn_handler->data[id]);
                               //kfree(tmp);
-
-                              if(lc_conn_socket)
-                              {
-                                      leader_client_exit(lc_conn_socket);
-                              }
-
                               sock_release(tcp_conn_handler->data[id]->\
                                            accept_socket);
                               /*
@@ -786,7 +910,7 @@ bfltresp:
 
                               tcp_server_send(accept_socket, out_buf,\
                                               strlen(out_buf), MSG_DONTWAIT);
-                              if(rs)
+                              if(rs != NULL)
                               {
                                       conn_data->in_buf = in_buf;
                                       inform_others(conn_data, rs);
@@ -812,27 +936,26 @@ bfltresp:
         */
 
 out:
-       //down_write(&rs_rwmutex);
-       write_lock(&rs_rwspinlock);
+       //write_lock(&rs_rwspinlock);
+       down_write(&rs_rwmutex);
        if(rs != NULL)
        {
                if(!list_empty(&rs_head))
                        list_del_init(&(rs->rs_list));
-               //kfree(rs->rs_ip);
-               if(rs->rs_bitmap != NULL)
-                       vfree(rs->rs_bitmap);
-               kfree(rs);
-       }
-       write_unlock(&rs_rwspinlock);
-       //up_write(&rs_rwmutex);
 
-       if(lc_conn_socket)
-       {
-         pr_info(" *** mtp | closing leader client[%d] connection | "
+               pr_info(" *** mtp | closing leader client[%d] connection | "
                  "connection_handler *** \n", id);
 
-         leader_client_exit(lc_conn_socket);
+               leader_client_exit(rs);
+               
+               if(rs->rs_bitmap != NULL)
+                       vfree(rs->rs_bitmap);
+
+               kfree(rs);
        }
+       //write_unlock(&rs_rwspinlock);
+       up_write(&rs_rwmutex);
+
 drop:
        tcp_conn_handler->tcp_conn_handler_stopped[id]= 1;
        kfree(tcp_conn_handler->data[id]->address);
@@ -1002,30 +1125,6 @@ int tcp_server_accept(void)
                pr_info(" *** mtp | handle connection | "
                        "tcp_server_accept *** \n");
 
-               /*
-               while((accept_err = tcp_server_receive(accept_socket, in_buf,\
-                                               len, MSG_DONTWAIT)))
-               {*/
-                       /* not needed here
-                       if(kthread_should_stop())
-                       {
-                               pr_info(" *** mtp | tcp server acceptor thread "
-                                       "stopped | tcp_server_accept *** \n");
-                               tcp_acceptor_stopped = 1;
-                               do_exit(0);
-                       }
-                       */
-                /*
-                       if(accept_err == 0)
-                               continue;
-
-                       memset(out_buf, 0, len+1);
-                       strcat(out_buf, "kernel server: hi");
-                       pr_info("sending the package\n");
-                       tcp_server_send(accept_socket, out_buf, strlen(out_buf),\
-                                       MSG_DONTWAIT);
-               }
-               */
 
                /*should I protect this against concurrent access?*/
                for(id = 0; id < MAX_CONNS; id++)
@@ -1236,9 +1335,21 @@ static void __exit network_server_exit(void)
                 {
                         if(tcp_conn_handler->thread[id] != NULL)
                         {
+                                if(pid_alive(tcp_conn_handler->thread[id]))
+                                        pr_info(" *** mtp | connection handler "
+                                                "thread: %d is not stale and "
+                                                "safe to kill | "
+                                                "network_server_exit *** \n", id);
+                                else
+                                        continue;
 
                         if(!tcp_conn_handler->tcp_conn_handler_stopped[id])
                                 {
+                                        pr_info(" *** mtp | calling kthread_stop "
+                                                "on connection handler thread: %d "
+                                                "is not stale and safe to kill | "
+                                                "network_server_exit *** \n", id);
+
                                         ret = 
                                 kthread_stop(tcp_conn_handler->thread[id]);
 

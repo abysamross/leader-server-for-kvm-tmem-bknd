@@ -57,10 +57,10 @@ u32 create_addr_from_str(char *str)
 int leader_client_send(struct socket *sock, void  *snd_buf, const size_t length,\
                        unsigned long flags, int huge)
 {
+        int len, written = 0, left = length, count = length;
         struct msghdr msg;
         //struct iovec iov;
         struct kvec vec;
-        int len, written = 0, left = length;
         char *buf;
         mm_segment_t oldmm;
 
@@ -96,6 +96,11 @@ repeat_send:
 
         if(huge)
         {
+                if(count < 0)
+                        goto send_out;
+
+                count--;
+
                 if(len > 0)
                 {
                         //pr_info("written: %d\n", len);
@@ -107,6 +112,9 @@ repeat_send:
                                 goto repeat_send;
                 }
         }
+
+send_out:
+
         set_fs(oldmm);
         pr_info(" *** mtp | return from send after writing total: %d bytes, "
                 "last write: %d bytes | leader_client_send \n", written, len);
@@ -183,14 +191,14 @@ inform_retry:
                  src_rs->rs_ip, src_rs->rs_port);
 
         pr_info(" *** mtp | leader client[%d] to rs[%d] sending %s to "
-                "%s:%d | leader_client_fwd_filter ***\n",
+                "%s:%d | leader_client_inform_others ***\n",
                 lid, id, out_msg, ip, port);
 
         ret = leader_client_send(conn_socket, out_msg, strlen(out_msg),\
                                  MSG_DONTWAIT, 0);
 
         pr_info(" *** mtp | leader client[%d] to rs[%d] succefully sent: %d "
-                "bytes | leader_client_fwd_filter ***\n",
+                "bytes | leader_client_inform_others ***\n",
                 lid, id, ret);
 
         if(ret != strlen(out_msg))
@@ -228,9 +236,11 @@ int leader_client_fwd_filter(struct remote_server *dest_rs,
         ip = dest_rs->rs_ip;
         port = dest_rs->rs_port;
         
+
         ret = 
         conn_socket->ops->getname(conn_socket, (struct sockaddr *)rs_addr,\
                                   &addr_len, 2);
+
         if(ret < 0)
                pr_info(" *** mtp | getname error: %d in leader client[%d] "
                        "to rs[%d] | leader_client_fwd_filter ***\n",
@@ -261,7 +271,7 @@ fwd_bflt_resend:
 
         ret = leader_client_send(conn_socket, out_msg, strlen(out_msg),\
                                  MSG_DONTWAIT, 0);
-
+        
         pr_info(" *** mtp | leader client[%d] to rs[%d] succefully sent: %d "
                 "bytes | leader_client_fwd_filter ***\n",
                 lid, id, ret);
@@ -272,6 +282,8 @@ fwd_bflt_wait:
         wait_event_timeout(bflt_wait,\
                            (skb_queue_empty(&conn_socket->sk->sk_receive_queue) == 0),\
                            10*HZ);
+
+
         if(!skb_queue_empty(&conn_socket->sk->sk_receive_queue))
         {
                 pr_info(" *** mtp | wait_event_timeout returned: %lu, secs left"
@@ -316,6 +328,7 @@ fwd_bflt_wait:
                                                 msleep(5000);
                                                 memset(out_msg, 0, len+1);        
                                                 strcat(out_msg, "FAIL");
+
                                                 ret = 
                                                 leader_client_send(conn_socket,\
                                                                 out_msg,\
@@ -374,6 +387,7 @@ fwd_bflt_wait:
         return 0;
 
 fwd_bflt_fail:
+
         pr_info(" *** mtp | leader client[%d] to rs[%d] FWD:BFLT "
                 "failed | leader_client_fwd_filter ***\n", lid, id);
         return -1;
@@ -410,30 +424,6 @@ int leader_client_connect(struct remote_server *rs)
         pr_info(" *** mtp | remote server: %d destination ip: %s:%d | "
                 "leader_client_connect ***\n", id, ip, port);
 
-        /*
-        char *response = kmalloc(4096, GFP_KERNEL);
-        char *reply = kmalloc(4096, GFP_KERNEL);
-        */
-
-        //DECLARE_WAITQUEUE(recv_wait, current);
-        //DECLARE_WAIT_QUEUE_HEAD(reg_wait);
-        
-        /*
-        ret = sock_create(PF_INET, SOCK_STREAM, IPPROTO_TCP, &conn_socket);
-        if(ret < 0)
-        {
-                pr_info(" *** mtp | Error: %d while creating first socket. | "
-                        "setup_connection *** \n", ret);
-                goto err;
-        }
-        */
-
-        /*simply testing*/
-        //pr_info("create_address: %u, create_addr_from_str: %u\n",
-        //        create_address(destip), create_addr_from_str(ip2));
-        //kfree(ip2);
-        /*simply testing*/
-
         memset(&saddr, 0, sizeof(saddr));
         saddr.sin_family = AF_INET;
         saddr.sin_port = htons(port);
@@ -453,31 +443,22 @@ int leader_client_connect(struct remote_server *rs)
                         id, ret, id);
                 goto fail;
         }
-/* The portion below this can be inserted into the main ktb code as per
-         * need.
-         */
-        //tcp_client_fwd_filter();
+
         return 0;
+
 fail:
-        sock_release(conn_socket);
+
         return -1;
 }
 
-/*
-int network_client_init(void)
-{
-        pr_info(" *** mtp | leader client init | network_client_init *** \n");
-        leader_client_connect();
-        return 0;
-}
-*/
-
-void leader_client_exit(struct socket *conn_socket)
+//void leader_client_exit(struct socket *conn_socket)
+void leader_client_exit(struct remote_server *rs)
 {
         int len = 49;
         unsigned long jleft;
         char response[len+1];
         char reply[len+1];
+        struct socket *conn_socket = rs->lcc_socket;
 
         //DECLARE_WAITQUEUE(exit_wait, current);
         DECLARE_WAIT_QUEUE_HEAD(exit_wait);
@@ -486,18 +467,13 @@ void leader_client_exit(struct socket *conn_socket)
 
         strcat(reply, "ADIOS"); 
         //tcp_client_send(conn_socket, reply);
+
         leader_client_send(conn_socket, reply, strlen(reply), MSG_DONTWAIT, 0);
 
-        //while(1)
-        //{
-                /*
-                tcp_client_receive(conn_socket, response);
-                add_wait_queue(&conn_socket->sk->sk_wq->wait, &exit_wait)
-                */
         jleft = 
         wait_event_timeout(exit_wait,\
-                           (skb_queue_empty(&conn_socket->sk->sk_receive_queue) == 0),
-                           5*HZ);
+                           (skb_queue_empty(&conn_socket->sk->sk_receive_queue)\
+                            == 0), 5*HZ);
 
         if(!skb_queue_empty(&conn_socket->sk->sk_receive_queue))
         {
@@ -509,8 +485,6 @@ void leader_client_exit(struct socket *conn_socket)
                 leader_client_receive(conn_socket, response, MSG_DONTWAIT);
                 //remove_wait_queue(&conn_socket->sk->sk_wq->wait, &exit_wait);
         }
-
-        //}
 
         if(conn_socket != NULL)
         {

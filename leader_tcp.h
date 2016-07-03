@@ -1,6 +1,11 @@
 #ifndef _LTCP_H_
 #define _LTCP_H_
 
+enum {
+        RS_ALIVE = 0,
+        RS_EXITING
+};
+
 struct bloom_filter {
 	struct kref		kref;
 	struct mutex		lock;
@@ -11,7 +16,11 @@ struct bloom_filter {
 
 struct remote_server
 {
+        //int status;
         struct socket *lcc_socket;
+        //struct mutex lcc_sock_mutex;
+        //struct mutex rs_mutex;
+        unsigned long rs_bit_lock;
         /*
          * lcc_socket; the socket using which leader
          * client communicates with remote server.
@@ -34,5 +43,5 @@ extern int leader_client_fwd_filter(struct remote_server *,\
 extern void leader_client_inform_others(struct remote_server *,\
                                        struct remote_server *);
 extern int leader_client_connect(struct remote_server *);
-extern void leader_client_exit(struct socket *);
+extern void leader_client_exit(struct remote_server *);
 #endif
